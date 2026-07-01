@@ -1,0 +1,26 @@
+# Codex 外壳评测配置示例
+# ------------------------------------------------------------------
+# 复制成 settings/codex/config.toml 并按注释填写。
+# run_eval.py --runner codex 会把 CODEX_HOME 指向 settings/codex，
+# 每个用例以 `codex exec -m <model> ...` 运行，供应商取下面的默认 model_provider。
+# settings/ 已被 .gitignore 忽略 —— 你的真实网关地址不会被提交。
+# ==================================================================
+
+# 默认模型与供应商：-m 会逐次覆盖 model；provider 用这里的默认值。
+model = "qwen-agentworld"
+model_provider = "local"
+approval_policy = "never"          # exec 非交互；再叠加命令行的 --dangerously-bypass...
+
+# —— 自定义模型供应商 ——
+# 【关键坑】2026-02 起 Codex 只支持 wire_api="responses"（OpenAI Responses API）。
+# 本机 llama-swap / llama.cpp 只有 chat/completions，必须经 LiteLLM 等网关
+# 额外转出一个 Responses 面，再让 base_url 指向它。详见 ../../CODEX_HERMES.md。
+[model_providers.local]
+name = "local-responses-gateway"
+base_url = "http://127.0.0.1:1235/v1"   # ← 指向你的 Responses 兼容网关（如 LiteLLM）
+wire_api = "responses"
+env_key = "LOCAL_LLM_KEY"               # ← Codex 从此环境变量读 Bearer token（勿把 key 写进本文件）
+requires_openai_auth = false            # 网关 key 通常非 sk- 前缀，需显式关掉该假设
+
+# 可选：若想用 profile 而非默认 model_provider 管理多套供应商，可加 [profiles.*]，
+# 并把 runners.py 里 CodexRunner 的 `-m <model>` 换成 `-p <profile>`。这里用默认供应商已够。

@@ -1,0 +1,38 @@
+# Hermes 外壳评测配置示例
+# ------------------------------------------------------------------
+# 复制成 settings/hermes/config.yaml 并按注释填写。
+# run_eval.py --runner hermes 会用 bwrap 把 settings/hermes 绑到 ~/.hermes，
+# 于是每次评测都用这份配置。模型用命令行 -m 覆盖（--models 传 provider/model，如 custom/qwen-agentworld）。
+# settings/ 已被 .gitignore 忽略 —— 真实 base_url / key 不会被提交。
+#
+# 与 Codex 不同：Hermes 走 OpenAI 兼容的 chat/completions 即可，
+# 【不需要】Responses 网关，可直接指向本机 llama-swap 的 :12345。
+# 另注：Hermes 要求模型上下文 ≥ 64k，否则多步工具工作流放不下。
+# ==================================================================
+
+model:
+  default: "custom/qwen-agentworld"   # provider/model；会被命令行 -m 覆盖
+  provider: "custom"                  # 自建 OpenAI 兼容端点用 custom（或 lmstudio/ollama）
+  base_url: "http://127.0.0.1:12345/v1"   # ← 本机 llama-swap（chat/completions 即可）
+  # api_key: "..."                    # 建议留空、改用 .env 里的环境变量，勿写进本文件
+  context_length: 131072              # ≥ 64000
+  max_tokens: 8192
+
+# 执行后端：本地跑，工作目录用当前目录（= 评测传入的 sandbox 子目录）
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 180
+
+# 关闭 Hermes 自带的 git worktree 隔离：我们已用自己的 sandbox + git reset 还原，
+# 若它另建 worktree 会让判分读不到模型实际改动。（键名以实机 cli-config.yaml.example 为准）
+worktree:
+  enabled: false
+
+# 给 CLI 平台开全套工具（含 terminal/file），模型才能真正改文件、跑命令
+platform_toolsets:
+  cli: [hermes-cli]
+
+# 子代理审批：评测已用命令行 --yolo 免批准，这里保持默认即可
+delegation:
+  subagent_auto_approve: true
