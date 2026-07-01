@@ -1,0 +1,12 @@
+{
+  "_comment": "本地/自建模型示例：Claude Code 只认 Anthropic 兼容 API，故需一个把你的模型(OpenAI 兼容/其它)转成 Anthropic 协议的代理(如 LiteLLM，本仓库不含)。把本文件复制成 settings/<model>.json 并填入你自己的地址与 key。",
+  "model": "your-model-name",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:PORT",
+    "ANTHROPIC_AUTH_TOKEN": "YOUR_PROXY_KEY",
+    "ANTHROPIC_SMALL_FAST_MODEL": "your-model-name",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  }
+}

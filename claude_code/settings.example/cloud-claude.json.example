@@ -1,0 +1,10 @@
+{
+  "_comment": "云端 Claude 订阅直连示例：不设 ANTHROPIC_BASE_URL，走本机 Claude Code 的登录态(~/.claude)鉴权，无需在此写 key。复制成 settings/<model>.json 使用。",
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5-20251001",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  }
+}

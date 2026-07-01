@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 评测输出（可能含模型原始输出片段，不纳入版本库）
+results/
+ab_results*.json
+ab_judge*.json
+niah_results*.json
+*.log
+_sol.py
+
+# 真实 settings（含各自的 key/代理地址）——只提交 settings.example/
+claude_code/settings/
+
+# sandbox 的本地 git 基线（由 setup_sandbox.sh 生成，勿嵌套提交）
+claude_code/sandbox/.git/
