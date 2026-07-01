@@ -14,7 +14,7 @@ approval_policy = "never"          # exec 非交互；再叠加命令行的 --da
 # —— 自定义模型供应商 ——
 # 【关键坑】2026-02 起 Codex 只支持 wire_api="responses"（OpenAI Responses API）。
 # 本机 llama-swap / llama.cpp 只有 chat/completions，必须经 LiteLLM 等网关
-# 额外转出一个 Responses 面，再让 base_url 指向它。详见 ../../CODEX_HERMES.md。
+# 额外转出一个 Responses 面，再让 base_url 指向它。详见根目录 README 的「Part 2」。
 [model_providers.local]
 name = "local-responses-gateway"
 base_url = "http://127.0.0.1:1235/v1"   # ← 指向你的 Responses 兼容网关（如 LiteLLM）

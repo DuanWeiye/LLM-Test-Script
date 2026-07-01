@@ -146,7 +146,7 @@ class CodexRunner(Runner):
 
     注意：2026-02 起 Codex 仅支持 wire_api="responses"（OpenAI Responses API）。
     本机 llama-swap 只有 chat/completions，须经 LiteLLM 等网关转出 Responses 面，
-    并在 config.toml 的 [model_providers.*] 指向该网关。详见 CODEX_HERMES.md。
+    并在 config.toml 的 [model_providers.*] 指向该网关。详见根目录 README 的「Part 2」。
     """
     name = "codex"
 
