@@ -118,7 +118,8 @@ def run_hc(model, prompt, test, forbid):
             samples.append({"ok": False, "info": f"用了禁用的 {forbid}"}); continue
         ok, info = run_code(code, test)
         p += 1 if ok else 0
-        samples.append({"ok": ok, "info": info, "tps": r.get("tps")})
+        samples.append({"ok": ok, "info": info, "tps": r.get("tps"),
+                         "finish_reason": r.get("finish_reason"), "reasoning_len": r.get("reasoning_len")})
     return p, len(seeds), samples
 
 def main():
@@ -134,27 +135,31 @@ def main():
             r = chat(model, prompt, temperature=0, max_tokens=1200)
             ans = extract_answer(r.get("content", ""))
             ok = num_eq(ans, exp) if kind == "num" else (str(exp).lower() in ans.lower())
-            out[model][cid] = {"dim": "reason", "lang": lang, "pass": ok, "answer": ans[:60], "content": r.get("content","")[-300:]}
+            out[model][cid] = {"dim": "reason", "lang": lang, "pass": ok, "answer": ans[:60], "content": r.get("content","")[-300:],
+                               "finish_reason": r.get("finish_reason")}
             print(f"  [{cid}/{lang}] reason {'PASS' if ok else 'FAIL'} (ans={ans[:30]!r} exp={exp})", flush=True)
         for cid, lang, prompt, kws in K:
             r = chat(model, prompt, temperature=0, max_tokens=400)
             c = r.get("content", "")
             ok = any(k.lower() in c.lower() for k in kws)
-            out[model][cid] = {"dim": "knowledge", "lang": lang, "pass": ok, "content": c[:200]}
+            out[model][cid] = {"dim": "knowledge", "lang": lang, "pass": ok, "content": c[:200],
+                               "finish_reason": r.get("finish_reason")}
             print(f"  [{cid}/{lang}] knowledge {'PASS' if ok else 'FAIL'}", flush=True)
         for cid, lang, prompt, chk in IF:
             r = chat(model, prompt, temperature=0, max_tokens=400)
             c = r.get("content", "")
             try: ok = bool(chk(c))
             except Exception: ok = False
-            out[model][cid] = {"dim": "instruct", "lang": lang, "pass": ok, "content": c[:200]}
+            out[model][cid] = {"dim": "instruct", "lang": lang, "pass": ok, "content": c[:200],
+                               "finish_reason": r.get("finish_reason")}
             print(f"  [{cid}/{lang}] instruct {'PASS' if ok else 'FAIL'}", flush=True)
         for cid, lang, prompt, et, ra, en in TT:
             r = chat(model, prompt, tools=TOOLS, temperature=0, max_tokens=500)
             if "error" in r: out[model][cid] = {"dim":"tool","lang":lang,"pass":False,"info":r["error"]}; continue
             ok, info = grade_tool(r, et, ra, en)
             out[model][cid] = {"dim": "tool", "lang": lang, "pass": ok, "info": info,
-                               "content": r.get("content","")[:160], "tool_calls": r.get("tool_calls")}
+                               "content": r.get("content","")[:160], "tool_calls": r.get("tool_calls"),
+                               "finish_reason": r.get("finish_reason")}
             print(f"  [{cid}/{lang}] tool {'PASS' if ok else 'FAIL'} | {info}", flush=True)
         for cid, lang, prompt in BR:
             r = chat(model, prompt, temperature=0, max_tokens=400)

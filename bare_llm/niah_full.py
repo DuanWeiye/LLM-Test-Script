@@ -22,7 +22,8 @@ for model in MODELS:
                 cells.append({"depth": depth, "hit": False, "err": str(e)[:80]}); continue
             hit = any(k.lower() in r["ans"].lower() for k in kw)
             cells.append({"depth": depth, "hit": hit, "prompt_n": r["prompt_n"],
-                          "wall": r["wall"], "ans": r["ans"][:60]})
+                          "wall": r["wall"], "ans": r["ans"][:60],
+                          "finish_reason": r.get("finish_reason"), "reasoning_len": r.get("reasoning_len")})
         actual = next((c.get("prompt_n") for c in cells if c.get("prompt_n")), "?")
         recall = sum(1 for c in cells if c.get("hit"))
         out[model][str(L)] = {"actual_tokens": actual, "recall": recall, "cells": cells}

@@ -1,6 +1,9 @@
 # NIAH 公共库：造含 6 情景针 + 大量相似干扰项的长文；前缀缓存复用。
 import os, json, time, urllib.request
 BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:12345/v1").rstrip("/") + "/chat/completions"
+# 思考模型的 reasoning 也占 max_tokens，120 是给非思考模型定的紧预算，同 eval_lib 用同一套环境变量兜底放宽。
+_MT_MULT = float(os.environ.get("EVAL_MAX_TOKENS_MULT", "1"))
+_MT_MIN = int(os.environ.get("EVAL_MAX_TOKENS_MIN", "0"))
 
 # 6 个情景针：(depth 占比, 文本, 问题, 命中关键词)
 NEEDLES = [
@@ -52,6 +55,7 @@ def build_doc(target_tokens):
 _SYS = "你是检索助手。只输出被问到的那个具体值本身（一个词/数字/日期/口令），不要任何前缀、解释或出处说明（不要写“根据备忘录…”）。"
 
 def ask(model, doc, question, max_tokens=120):
+    max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
     content = doc + "\n\n问题：" + question
     body = json.dumps({"model": model, "messages": [
                            {"role": "system", "content": _SYS},
@@ -63,5 +67,8 @@ def ask(model, doc, question, max_tokens=120):
     d = json.load(urllib.request.urlopen(req, timeout=1200))
     wall = time.time() - t0
     t = d.get("timings", {})
+    msg = d["choices"][0]["message"]
     return {"prompt_n": t.get("prompt_n"), "prefill_tps": t.get("prompt_per_second"),
-            "wall": round(wall, 1), "ans": d["choices"][0]["message"]["content"].strip()}
+            "wall": round(wall, 1), "ans": msg["content"].strip(),
+            "finish_reason": d["choices"][0].get("finish_reason"),
+            "reasoning_len": len(msg.get("reasoning_content") or "")}

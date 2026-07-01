@@ -109,7 +109,8 @@ def run_code_case(model, prompt, test):
         if "error" in r: samples.append({"err":r["error"]}); continue
         ok,info=run_code(extract_code(r["content"]),test)
         passes+=1 if ok else 0
-        samples.append({"ok":ok,"info":info,"tps":r.get("tps")})
+        samples.append({"ok":ok,"info":info,"tps":r.get("tps"),
+                         "finish_reason":r.get("finish_reason"),"reasoning_len":r.get("reasoning_len")})
     return passes,len(seeds),samples
 
 def main():
@@ -129,7 +130,8 @@ def main():
                 out[model][cid]={"dim":"tool","lang":lang,"pass":False,"info":r["error"]}; continue
             ok,info=grade_tool(r,et,ra,en)
             out[model][cid]={"dim":"tool","lang":lang,"pass":ok,"info":info,
-                             "content":r["content"][:200],"tool_calls":r.get("tool_calls")}
+                             "content":r["content"][:200],"tool_calls":r.get("tool_calls"),
+                             "finish_reason":r.get("finish_reason")}
             print(f"  [{cid}/{lang}] tool {'PASS' if ok else 'FAIL'} | {info}",flush=True)
         # C 事实/幻觉
         for cid,lang,prompt,mc in FACT:
@@ -137,7 +139,8 @@ def main():
             content=r.get("content","")
             if mc is not None:  # 自动判
                 ok=any(k.lower() in content.lower() for k in mc)
-                out[model][cid]={"dim":"fact","lang":lang,"pass":ok,"content":content[:300]}
+                out[model][cid]={"dim":"fact","lang":lang,"pass":ok,"content":content[:300],
+                                 "finish_reason":r.get("finish_reason")}
                 print(f"  [{cid}/{lang}] fact {'PASS' if ok else 'FAIL'}",flush=True)
             else:  # 留给盲评
                 out[model][cid]={"dim":"halluc","lang":lang,"pass":None,"content":content}
@@ -149,7 +152,8 @@ def main():
             content=r.get("content","")
             try: ok=bool(chk(content))
             except Exception: ok=False
-            out[model][cid]={"dim":"format","lang":lang,"pass":ok,"content":content[:200]}
+            out[model][cid]={"dim":"format","lang":lang,"pass":ok,"content":content[:200],
+                             "finish_reason":r.get("finish_reason")}
             print(f"  [{cid}/{lang}] format {'PASS' if ok else 'FAIL'}",flush=True)
         # 代码质量盲评素材：取 A3/A9 的产物留给 Claude 评质量
         for cid in ["A3","A9","A5"]:

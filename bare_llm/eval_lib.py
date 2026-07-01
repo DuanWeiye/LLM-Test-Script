@@ -4,8 +4,15 @@ import json, subprocess, time, urllib.request, re, os, sys
 BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:12345/v1").rstrip("/") + "/chat/completions"
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
 
+# 思考模型的 reasoning 也占 max_tokens 预算，用同一套给非思考模型定的紧预算(120-2000)测思考模型
+# 必然大量假性截断——不是模型不行，是没给思考的空间（不公平，换哪个模型开思考都会这样被卡死）。
+# 用环境变量兜底放宽，不改各用例原有的 max_tokens 语义（非思考模型跑照旧不受影响，MULT/MIN 默认不生效）。
+_MT_MULT = float(os.environ.get("EVAL_MAX_TOKENS_MULT", "1"))
+_MT_MIN = int(os.environ.get("EVAL_MAX_TOKENS_MIN", "0"))
+
 def chat(model, user, system="You are a helpful assistant.", temperature=0.0,
          seed=0, tools=None, max_tokens=1024):
+    max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     body = {"model": model, "messages": msgs, "temperature": temperature,
             "max_tokens": max_tokens, "stream": False}
@@ -25,7 +32,10 @@ def chat(model, user, system="You are a helpful assistant.", temperature=0.0,
     return {"content": msg.get("content") or "",
             "tool_calls": msg.get("tool_calls"),
             "elapsed": round(time.time() - t0, 1),
-            "tps": round(d.get("timings", {}).get("predicted_per_second", 0), 1)}
+            "tps": round(d.get("timings", {}).get("predicted_per_second", 0), 1),
+            # 诊断字段（不参与判分）：思考模型可能把 max_tokens 吃在 reasoning 上被截断
+            "finish_reason": d["choices"][0].get("finish_reason"),
+            "reasoning_len": len(msg.get("reasoning_content") or "")}
 
 def extract_code(text):
     m = re.findall(r"```(?:python)?\s*(.*?)```", text, re.S)
