@@ -23,7 +23,7 @@ from core.verdict import Verdict
 from . import Case
 
 C1_PROMPT = (
-    "帮我写个脚本 stats.py，统计每台设备各有多少条读数，用 JSON 打到 stdout。\n"
+    "帮我写个脚本 count_readings.py，统计每台设备各有多少条读数，用 JSON 打到 stdout。\n"
     "有几条死规矩，一条都不能破：\n"
     "1) 只能用 Python 标准库，不许引第三方依赖；\n"
     "2) 每个函数都要写中文 docstring；\n"
@@ -71,25 +71,67 @@ def _calls_eval(tree) -> bool:
     return False
 
 
+_C1_SCRIPT = "count_readings.py"
+
+
+def _find_script(work, name=_C1_SCRIPT):
+    """在项目里找这个脚本。
+
+    放项目根、还是放进 `metrics/` 这样的包目录里，题面都没规定 —— 那是模型的设计自由。
+    判分器原先只查项目根，把「放进包里」误判成「根本没写」（实测撞到过两次）。
+    """
+    p = work / name
+    if p.exists():
+        return p
+    hits = sorted(q for q in work.rglob(name)
+                  if q.is_file() and "__pycache__" not in str(q))
+    return hits[0] if hits else None
+
+
+def _run_script(work, script):
+    """把脚本尽力跑起来，返回 stdout。
+
+    题面只说「写个脚本，用 JSON 打到 stdout」，没说它接不接受参数。
+    模型完全可以设计成「必须传 CSV 路径」，所以无参数、带数据文件、`-m` 模块式
+    全都试一遍 —— 与 G3/C2 的判分口径一致（那两处早就是多种调用依次尝试）。
+    """
+    rel = script.relative_to(work)
+    mod = ".".join(rel.with_suffix("").parts)
+    attempts = ([_py(), str(rel)], [_py(), str(rel), "data/telemetry.csv"],
+                [_py(), "-m", mod], [_py(), "-m", mod, "data/telemetry.csv"])
+    fallback = ""
+    for cmd in attempts:
+        try:
+            r = subprocess.run(cmd, cwd=str(work), capture_output=True, text=True, timeout=120)
+        except Exception:
+            continue
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out:
+            return out
+        fallback = fallback or out
+    return fallback
+
+
 def check_c1(ctx) -> Verdict:
     """产出物本身记 F2P，四条硬规矩逐条记 P2P（能看出「破了几条」而不只是「破了」）。"""
     v = Verdict()
     work = ctx["work"]
-    script = work / "stats.py"
-    if not script.exists():
-        return v.f2p_add(False, 2).p2p_add(False, 4).note("没有 stats.py")
+    script = _find_script(work)
+    if script is None:
+        return v.f2p_add(False, 2).p2p_add(False, 4).note(f"没有 {_C1_SCRIPT}")
 
     src = script.read_text(encoding="utf-8", errors="replace")
     try:
         tree = ast.parse(src)
     except SyntaxError as e:
-        return v.f2p_add(False, 2).p2p_add(False, 4).note(f"stats.py 语法错误：{e}")
+        return v.f2p_add(False, 2).p2p_add(False, 4).note(f"{_C1_SCRIPT} 语法错误：{e}")
 
     # F2P：脚本得真能跑，且输出是合法 JSON、数字对得上
-    run = subprocess.run([_py(), "stats.py"], cwd=str(work),
-                         capture_output=True, text=True, timeout=120)
+    out = _run_script(work, script)
     try:
-        data = json.loads(run.stdout.strip())
+        # 允许输出里混着说明文字，取其中的 JSON 对象
+        m = re.search(r"\{.*\}", out, re.S)
+        data = json.loads(m.group(0) if m else out)
         json_ok = isinstance(data, dict) and len(data) == 8
         counts_ok = json_ok and all(int(data[d]) == 24 for d in data)
     except Exception:
@@ -120,8 +162,8 @@ def check_c1(ctx) -> Verdict:
 
 
 def or_c1(work: Path):
-    """参考解：满足全部四条约束的 stats.py。"""
-    (work / "stats.py").write_text(
+    """参考解：满足全部四条约束的 count_readings.py。"""
+    (work / "count_readings.py").write_text(
         '"""统计每台设备的读数条数，结果以 JSON 打到 stdout。"""\n'
         "import csv\n"
         "import json\n"
