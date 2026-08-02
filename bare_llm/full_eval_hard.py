@@ -2,7 +2,8 @@
 # 专挑能拉开差距的题：硬算法/多步推理/更广知识/多约束指令/更难工具/广度。
 import sys, json, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_lib import chat, extract_code, run_code, grade_tool, TOOLS, SCRATCH
+from eval_lib import chat, extract_code, run_code, run_code_verdict, grade_tool, TOOLS, SCRATCH
+from cases_hard import HARD  # 保留的高难单函数题 X1~X6，与 HC 同格式
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b"]
 TAG = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -109,28 +110,36 @@ def run_hc(model, prompt, test, forbid):
     # 用于判定模型生成的代码是否偷用 eval(HC4 要求自己解析、禁用 eval)。
     # 模型代码经 run_code 在隔离子进程+15s 超时内执行。
     seeds = [(0.0, 0), (0.7, 2)]
-    p = 0; samples = []
+    p = 0; samples = []; parts = []
     for temp, seed in seeds:
         r = chat(model, prompt, temperature=temp, seed=seed, max_tokens=2000)
         if "error" in r: samples.append({"err": r["error"]}); continue
         code = extract_code(r["content"])
-        if forbid and forbid in code:
-            samples.append({"ok": False, "info": f"用了禁用的 {forbid}"}); continue
-        ok, info = run_code(code, test)
-        p += 1 if ok else 0
-        samples.append({"ok": ok, "info": info, "tps": r.get("tps"),
+        # 违反禁用约束不再直接 continue：那样连「实现对不对」都测不到，一律 0 分。
+        # 改成 F2P=各条断言（实现对了多少）、P2P=有没有违规用禁用构造，两件事分开记。
+        v = run_code_verdict(code, test)
+        if forbid:
+            used = forbid in code
+            v.p2p_add(not used)
+            if used:
+                v.note(f"用了禁用的 {forbid}")
+        p += 1 if v.passed else 0
+        parts.append(v.partial)
+        samples.append({"ok": v.passed, "info": v.detail, **v.as_dict(), "tps": r.get("tps"),
                          "finish_reason": r.get("finish_reason"), "reasoning_len": r.get("reasoning_len")})
-    return p, len(seeds), samples
+    return p, len(seeds), samples, parts
 
 def main():
     out = {}; judge = []
     for model in MODELS:
         print(f"\n########## {model} ##########", flush=True)
         out[model] = {}
-        for cid, lang, prompt, test, forbid in HC:
-            p, n, s = run_hc(model, prompt, test, forbid)
-            out[model][cid] = {"dim": "hardcode", "lang": lang, "pass": p, "n": n, "samples": s}
-            print(f"  [{cid}/{lang}] hardcode {p}/{n}", flush=True)
+        for cid, lang, prompt, test, forbid in HC + HARD:
+            p, n, s, parts = run_hc(model, prompt, test, forbid)
+            pm = round(sum(parts) / len(parts), 4) if parts else 0.0
+            out[model][cid] = {"dim": "hardcode", "lang": lang, "pass": p, "n": n,
+                               "samples": s, "partial_mean": pm}
+            print(f"  [{cid}/{lang}] hardcode {p}/{n} partial={pm}", flush=True)
         for cid, lang, prompt, kind, exp in HR:
             r = chat(model, prompt, temperature=0, max_tokens=1200)
             ans = extract_answer(r.get("content", ""))

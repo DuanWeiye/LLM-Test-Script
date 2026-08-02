@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "llama-server 2.23.1"

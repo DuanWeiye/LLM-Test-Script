@@ -1,0 +1,3 @@
+# 旧版阈值备份，已经不用了
+[temperature]
+warn_c = 75

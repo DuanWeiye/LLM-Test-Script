@@ -5,11 +5,13 @@
 | 目录 | 名字 | 考什么 | 怎么接模型 |
 |---|---|---|---|
 | [`bare_llm/`](bare_llm/) | **纯裸测** | 模型**原始能力**：编码 / 工具判断 / 事实 / 抗幻觉 / 格式 / 多步推理 / 知识 / 超长上下文检索 | 直连任意 **OpenAI 兼容** `/chat/completions` 端点 |
-| [`claude_code/`](claude_code/) | **接 agent 外壳** | **真 agent 场景**：多轮工具编排、在真实 git 沙箱里改代码跑 pytest、缺参反问、深度诊断 | 用 agent CLI（Claude Code / Codex / Hermes）当统一外壳，只换底层模型 |
+| [`claude_code/`](claude_code/) | **接 agent 外壳** | **真 agent 场景**：25 条用户口吻的模糊需求，只测外部可观察行为 —— 多轮工具编排、改代码跑隐藏验收、缺参反问、开卷/闭卷诊断 | 用 Claude Code 当统一外壳，只换底层模型 endpoint |
 
 两套用**同一批模型**跑，能对比出「裸模型能力」和「装进 agent 外壳后的实战表现」的差异——很多模型在裸测某维度弱，但在有完整脚手架的 agent 环境里并不复现，反之亦然。
 
-第二套支持三种可插拔外壳（`--runner claude|codex|hermes`），换外壳不动隔离与判分。⚠️ **注意：目前只有 Claude Code 已实机验证；Codex / Hermes 的适配已按官方文档写好，但尚未在本机实测**——用前请照 [Part 2](#part-2--接-agent-外壳-claude_code) 末尾的《合并前验证清单》逐项核对。
+> **2026-08-02 第二套整体重构**：需求形态从「精确规格」换成「用户口吻的模糊需求」，判分口径换成 F2P/P2P 由基线快照自动划分，隔离方式换成**零特权**（不再需要 bwrap 与 `sudo sysctl`）。此前基于旧架构的结果不可与新版对比。
+>
+> 曾经支持的 codex / hermes 外壳依赖 bwrap，本次一并覆盖，等这套跑顺了再重做；旧实现在 git 历史 `git show 98d3a7a:claude_code/runners.py`。
 
 > 起源：在一台 NVIDIA DGX Spark（GB10 / ARM64）上评测本地部署的多个 Qwen 系模型（经 llama.cpp / llama-swap 提供 OpenAI 兼容端点），顺带对照几个云端模型。脚本本身与具体硬件、具体模型无关，任何 OpenAI 兼容端点都能用。
 
@@ -26,15 +28,14 @@ LLM-Test-Script/
 │   ├── niah_lib.py            #   NIAH 公共库：造长文埋针 + 提问
 │   └── niah_full.py           #   超长上下文大海捞针（4 长度 × 6 情景）
 └── claude_code/               # 接 agent 外壳（真 agent 场景）
-    ├── run_eval.py            #   运行引擎：--runner 选外壳 + bwrap 隔离沙箱 + 抓工具调用 + 判分
-    ├── runners.py             #   可插拔「外壳驱动」：claude / codex / hermes 三个
-    ├── eval_cases.py          #   14 个用例定义 + 各自确定性判分（与外壳无关）
-    ├── setup_sandbox.sh       #   把 sandbox 初始化成 git 基线（首次必跑）
-    ├── sandbox/               #   合成项目 telemetry_kit + 各用例素材（评测在此隔离运行）
-    └── settings.example/      #   各外壳配置占位示例（复制成 settings/ 自行填）
-        ├── local-model.json.example / cloud-claude.json.example   # Claude Code
-        ├── codex/config.toml.example                              # Codex
-        └── hermes/config.yaml.example                             # Hermes
+    ├── run_eval.py            #   引擎：baseline / oracle / self-check / judge / report / 评测
+    ├── core/                  #   判分口径、基线快照、工作目录、保管库、LLM 裁判
+    ├── cases/                 #   25 条用例定义（按维度分文件）
+    ├── suites/                #   用例项目模板（7 个合成项目）
+    ├── vault/                 #   隐藏验收测试（压缩存放，磁盘上 grep 不到）
+    ├── baseline.json          #   基线快照：哪些检查项本来红（F2P）、哪些本来绿（P2P）
+    ├── DESIGN.md              #   设计说明 + 用例清单 + 踩坑记录（接手先读这个）
+    └── settings.example/      #   endpoint 配置占位示例（复制成 settings/ 自行填）
 ```
 
 ---
@@ -87,141 +88,114 @@ python3 niah_full.py "my-model-a,my-model-b"
 
 ## Part 2 · 接 agent 外壳 `claude_code/`
 
-用**同一个 agent CLI 外壳**当脚手架，只把底层模型换掉，跑 14 个 agent 用例。每个用例在**隔离的 git 沙箱**里执行，跑前自动 `git reset` 还原，判分用确定性方法（pytest / 文件 diff / 断言；深度诊断题用 rubric 命中）。
+用 **Claude Code 当统一外壳**，只把底层模型 endpoint 换掉，跑 25 条 agent 用例。
+详细设计见 [`claude_code/DESIGN.md`](claude_code/DESIGN.md)。
 
-支持三种可插拔外壳，用 `--runner` 选：
+### 用例长什么样
 
-| runner | 外壳 | 状态 |
+需求一律用**用户口吻**说，不给函数名、字段名、子命令名、算法：
+
+> 这个小工具现在只能看平均温度和超限的设备。我想提前发现快要出问题的机器——就是那些温度在一路往上走的。
+> 你给加到这个命令行工具里吧，具体怎么设计、叫什么名字、输出成什么样，你看着办。已经有的功能别弄坏。
+
+判分因此只看**外部可观察行为**：先从 `--help` 里发现模型自己起的子命令名，再验证输出语义。
+验收测试**对模型不可见**（压缩存在 `vault/`，判分时才临时注入、跑完删除）。
+
+| 维度 | 条数 | 例子 |
 |---|---|---|
-| `claude` | Claude Code（默认） | ✅ 已实机验证 |
-| `codex`  | OpenAI Codex CLI | ⚠️ 适配已写、**尚未实机验证** |
-| `hermes` | Nous Hermes Agent | ⚠️ 适配已写、**尚未实机验证** |
+| 工具纪律 | 5 | 信息不足该不该先问、跑失败会不会如实说、模糊又危险的指令怎么办 |
+| 模糊新功能 | 5 | 趋势检测、日志撑坏界面、挑最新版本的后端、私密信息外置、导出 |
+| 现象驱动修 bug | 4 | 「越用越卡」「断开重连就崩」「读出来是空的」——只给现象，定位靠模型 |
+| 向后兼容 | 3 | 用户只提新需求，没提老调用方 —— 老行为坏了由 P2P 自动抓住 |
+| 多步可靠（k=5） | 2 | 链条长、每步都要对、跑五次都要对 |
+| 约束遵循 | 2 | 一条规矩写在需求里，一条写在 `CONTRIBUTING.md` 里（用户一个字没提） |
+| 长程理解 | 2 | 跨文件溯源、长文档综合（带回滚记录之类的干扰项） |
+| 深度诊断 | 2 | 同一个故障现场，开卷（项目里放资料）/ 闭卷（不放）对照 |
 
-> **架构**：外壳调用抽象在 `runners.py`（每个外壳一个驱动，负责命令行与输出解析）；sandbox 还原、bwrap 反作弊隔离、判分逻辑三个外壳**共用**——换外壳只换这一层，再加第四个外壳只需实现一个驱动。
+### 判分口径：F2P / P2P，由基线快照自动划分
 
-### 三种外壳的关键差异
+- **F2P**（fail-to-pass）＝这次要求做到的事，基线下必然红。
+- **P2P**（pass-to-pass）＝不许弄坏的事，基线下本来就绿。
+- `partial = (f2p_passed + p2p_passed) / 总检查项`
 
-| | Claude Code | Codex CLI | Hermes Agent |
-|---|---|---|---|
-| headless 命令 | `claude -p` | `codex exec` | `hermes -z` |
-| 机器可读输出 | `--output-format stream-json` | `--json`（JSONL 事件） | 弱：`-z` 只出最终文本 |
-| 工具轨迹 | stream-json 里 `tool_use` | JSONL `item.completed` | 需 `hermes sessions export` 补采 |
-| 选模型 | `--settings <model>.json` | `-m <model>`（供应商走 config 默认） | `-m provider/model` |
-| 免批准 | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--yolo` |
-| 配置位置 | `settings/<model>.json` | `settings/codex/config.toml`（经 `CODEX_HOME`） | `settings/hermes/config.yaml`（bwrap 绑成 `~/.hermes`） |
-| **模型端点协议** | Anthropic 兼容 | **仅 Responses API** ⚠️ | OpenAI chat/completions 即可 |
+归属**不用人手写**：`--baseline` 在干净项目上跑一遍全部检查项，红的算 F2P、绿的算 P2P。
+这带来一个额外好处 —— **「用户没提但不该弄坏」的东西自动被守住**：
+让模型给配置项改名时用户压根没说要兼容老配置，但「老键名读得出」在基线里是绿的，
+只改名不做兼容，P2P 立刻红。
 
-**最大的坑 —— Codex 只吃 Responses API**：2026-02 起 Codex 的 `wire_api` 只支持 `responses`。本机 llama-swap / llama.cpp 只有 chat/completions，所以给 Codex 用**必须多搭一层网关**（如 [LiteLLM](https://github.com/BerriAI/litellm)）把本地模型转出一个 Responses 面，`config.toml` 的 `base_url` 指向该网关。**Hermes 没有这个限制，可直接指 `:12345`。**（`bare_llm` 是绕过外壳直接打 chat/completions，也不受此限。）
+### 前置
 
-### 通用前置
+- **`claude` CLI 在 PATH 中**。
+- 一个**带 pytest 的 Python 解释器**跑判分（会自动探测；也可 `export EVAL_PY=/path/to/python`）。
+- 开放题判分需要一个 **OpenAI 兼容端点**当裁判（默认 `http://127.0.0.1:12345/v1`，
+  可用 `JUDGE_BASE` / `JUDGE_MODEL` / `JUDGE_KEY` 覆盖）。
+- **不需要 bwrap，也不需要任何 `sudo` / `sysctl`。**
+- 本仓库**不含任何代理配置或 key**，端点请自行搭建。
 
-- 对应外壳的 **CLI 在 PATH 中**（`claude` / `codex` / `hermes`）。
-- **bwrap**（bubblewrap）——把每次外壳运行关进只看得到沙箱的命名空间，**防止模型 grep 到判分逻辑/答案作弊**（Ubuntu: `sudo apt install bubblewrap`）。
-- 一个**带 pytest 的 Python 解释器**跑判分（默认用运行 `run_eval.py` 的解释器；也可 `export EVAL_PY=/path/to/python`）。
-- **本仓库不含任何代理配置或 key**，网关/端点请自行搭建。
-
-### 步骤
-
-**① 配 settings（按外壳选一种，`settings/` 已被 `.gitignore` 忽略——真实 key 不会被提交）**
+### 跑
 
 ```bash
+cd claude_code
+
+# ① 配 settings（settings/ 已被 .gitignore 忽略，真实 key 不会入库）
 mkdir -p settings
+cp settings.example/local-model.json.example  settings/my-model.json
+# 编辑：model 名、ANTHROPIC_BASE_URL、ANTHROPIC_AUTH_TOKEN
 
-# —— Claude Code ——（需一个把模型转成 Anthropic 兼容 API 的代理，如 LiteLLM）
-cp settings.example/local-model.json.example  settings/my-model.json            # 本地/自建模型
-cp settings.example/cloud-claude.json.example settings/claude-sonnet-4-6.json   # 云端 Claude 订阅直连
-# 编辑 settings/*.json：model 名、ANTHROPIC_BASE_URL、ANTHROPIC_AUTH_TOKEN
+# ② 跑前自检（前两步不花 LLM）
+python3 run_eval.py --baseline      # 量基线 + 用例设计体检
+python3 run_eval.py --oracle        # 参考解必须条条满分
+python3 run_eval.py --judge-check   # 裁判自己先过考试
 
-# —— Codex ——（需一个 Responses 兼容网关，并 export LOCAL_LLM_KEY=<网关key>）
-mkdir -p settings/codex
-cp settings.example/codex/config.toml.example settings/codex/config.toml
-# 编辑：base_url 指向你的 Responses 网关、env_key 名对上你 export 的变量
+# ③ 正式评测（单模型约 79 次运行；**必须串行**，别同时跑多个模型）
+python3 run_eval.py --models my-model --cases all --stamp run1
 
-# —— Hermes ——（直连本机 llama-swap chat/completions，模型上下文需 ≥ 64k）
-mkdir -p settings/hermes
-cp settings.example/hermes/config.yaml.example settings/hermes/config.yaml
-# 编辑：base_url 指向 :12345、provider=custom
+# ④ 开放题离线判分 + 出汇总表
+python3 run_eval.py --judge  results/results_run1.json
+python3 run_eval.py --report results/results_run1.json
 ```
 
-**② 初始化沙箱**（首次必跑，让 run_eval 的还原机制可用）：
+报告里的格子是 `pass@1 (partial 均值)`；`⚠` 表示有运行被中断（超时/空输出），
+`❗` 表示判分器自己出错 —— 这两种都**不是**「模型答错」，要单独查。
 
-```bash
-bash setup_sandbox.sh
-```
+### 隔离怎么做的（零特权）
 
-**③ 放开 user namespace**（bwrap 隔离需要，Ubuntu 默认限制；评测后请恢复）：
+| 层 | 做法 | 挡住什么 |
+|---|---|---|
+| 工作目录 | 每次运行复制到 `/tmp/wk-<随机>/<项目名>`，**没有 .git** | 路径与评测框架无关联；模型也无法 `git diff` 反推基线 |
+| 验收测试 | 压缩+base64 存 `vault/`，判分时才在内存解开 | 磁盘上 grep 不到 `def test_` 与断言值 |
+| 外部资料 | 诊断题的资料放在项目内部，闭卷时整个目录不投放 | 不必遮蔽宿主任何目录 |
+| 用户级配置 | `--setting-sources project` | 不加载 `~/.claude/CLAUDE.md`（曾经真的因此泄过题） |
 
-```bash
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-# ……跑完评测后：
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-```
+保管库**不是加密**，挡的是「顺手 grep 撞见答案」；真要防铁了心作弊的 agent 得上容器。
 
-**④ 跑评测**：
+### 加一条用例
 
-```bash
-# --runner 选外壳（默认 claude）；--models 须有对应外壳的 settings；
-# --cases all 或逗号分隔用例 id；--k-default 覆盖每用例重复次数
-python3 run_eval.py --runner claude --models my-model --cases all --k-default 1 --stamp base
-python3 run_eval.py --runner claude --models my-model --cases A1,C2,E1 --stamp probe
-python3 run_eval.py --runner codex  --models qwen-agentworld          --cases all --stamp cx
-python3 run_eval.py --runner hermes --models custom/qwen-agentworld   --cases all --stamp hm
-```
-
-结果写入 `results/results_<runner>_<stamp>.json`（文件名带 runner，三套互不覆盖；每用例含 `pass_at_1`、`pass_k`、每次 runs 明细：工具列表/耗时/输出片段）。
-
-### 14 个用例
-
-| 维度 | 用例 |
-|---|---|
-| A 工具判断 | A1 该不该调 / A2 缺参反问 / A3 错误恢复 / A4 多工具编排 |
-| B 多步可靠（默认 k=5）| B1 数据处理链 / B2 多文件功能 / B3 端到端 |
-| C 代码 | C1 修 bug / C2 实现 percentile / C3 重构不破坏 / C4 代码问答 |
-| D 约束·长程 | D1 五约束机检 / D2 长文档综合 |
-| E 深度诊断（k=3）| E1 开卷（暴露答案文档目录，测主动找资料）/ E1I 闭卷（遮蔽，测纯推理） |
-
-**E1 开卷**用来测「模型会不会主动去翻资料」。它依赖一个你自己的「答案文档目录」——用环境变量指定，闭卷时会被 bwrap 遮蔽：
-
-```bash
-export EVAL_ANSWER_DOCS=/path/to/你的知识库    # 不设则开卷等同闭卷
-```
-
-### 已知限制（Codex / Hermes）
-
-1. **Hermes 工具轨迹不可靠**：`hermes -z` 只吐最终文本。工具列表靠事后 `hermes sessions export` 导出 JSONL 再解析，其字段形状需实机核实。采不到时驱动置 `tools_unknown=True`，`run_eval` 会在该次结果 `detail` 前加「[工具轨迹未采集,需人工复核]」，**绝不把「没采到」静默当成「没调工具」**。
-   - 受影响的判分：**A1**（要求「常识题不调工具」）依赖工具数为 0，Hermes 上须人工复核；其余用例看**文件产物 / 最终文本 / git 改动**，不依赖工具数，正常可用。
-2. **Codex 需要 Responses 网关**：没有网关就跑不了本地模型（见上）。这是部署问题，不是脚本问题。
-3. **bwrap 额外绑定**：codex/hermes 可能往各自 home 之外写缓存。目前只暴露 `CODEX_HOME` / `~/.hermes` + sandbox + `/tmp`；若实测报「只读文件系统」，按提示在 `runners.py` 对应驱动补一条 `--bind`。
-4. **Hermes 的 `worktree.enabled` 键名**按文档推测写就，实机请对照官方 `cli-config.yaml.example` 校正，确保它**不**另建 git worktree（否则判分读不到模型改动）。
-
-### 合并前验证清单（Codex / Hermes 本机务必逐项实测）
-
-- [ ] `codex exec --json` 里，最终答复确实来自 `item.completed` 且 `item.type=="agent_message"` 的 `text`；工具事件类型名与 `runners.py::CodexRunner` 解析的一致（`command_execution`/`file_change`/`mcp_tool_call`）。
-- [ ] `codex exec -m <model>` 能正确落到 `config.toml` 的默认 `model_provider`；`--skip-git-repo-check` 与 `--dangerously-bypass-approvals-and-sandbox` 均被接受、且自带沙箱确实关闭（能写 sandbox）。
-- [ ] LiteLLM（或其它网关）的 `/responses` 面对本地模型可用，Codex 握手成功。
-- [ ] `hermes -z "<prompt>" --yolo -m provider/model` 能无人值守跑完、只输出最终文本、且**真的改了 sandbox 文件**。
-- [ ] `hermes sessions export <out.jsonl>` 能导出最近会话，其 JSONL 工具字段与 `runners.py::HermesRunner._collect_tools` 的兜底解析对得上（对不上就照实际字段改）。
-- [ ] bwrap 把 `settings/hermes` 绑成 `~/.hermes` 后，Hermes 确实读到了我们的 `config.yaml`（模型/端点正确）。
-- [ ] 三个外壳各随便跑一两个用例（如 `--cases A3,C2`），确认 `results_<runner>_*.json` 结构正常、判分合理。
-
-实测跑通、看到真实输出后，把本清单勾掉并更新本节。
+1. 在 `suites/` 下放一个项目模板 —— **可见测试必须基线全绿**（有红测试等于一进门就剧透）
+2. 写隐藏验收测试，`python3 -m core.vault seal <用例ID> <文件>` 封存
+3. 在 `cases/<维度>.py` 里加一条 `Case`，配上参考解 `oracle`
+4. `--baseline` → `--oracle` → `--self-check` 三关跑通才算能用
 
 ---
 
 ## 评测理念（几条踩过坑的经验）
 
 - **看 `pass^k` 不只看 `pass@1`**：同一道难题重复跑 k 次、k 次全过才算稳。小模型 vs 顶级模型最大的差距往往在**一致性**，不在单次对错。
-- **必须隔离防泄题**：`claude -p` 用 `--setting-sources project`（不加载用户级 CLAUDE.md）+ bwrap 遮蔽判分脚本与答案文档，否则模型会 grep 到答案「开卷作弊」。
+- **必须隔离防泄题**：`--setting-sources project`（不加载用户级 CLAUDE.md）+ 工作目录与评测框架无路径关联 + 验收测试不落明文，否则模型会 grep 到答案「开卷作弊」。
+- **判分器自己也要有 oracle**：拿参考解跑一遍，不满分就说明框架坏了、这批模型分数全部不可信。本仓库这一版的**每一个**判分 bug 都是这么抓出来的，没有一个是靠眼睛看出来的。
+- **裁判也要过考试**：用 LLM 判开放题之前，先拿标注好的样本（含同义改写的正确答案、以及「提到 X 只为排除 X」这种最容易假阳性的写法）考一考它，判不对就别用它的结论。
 - **关键词判对错必有假阳性**：越彻底的回答越会「主动提到 X 来排除 X」，朴素子串匹配会把高级回答误杀（本仓库的诊断判分对「排除语境」做了否定判定，可作参考）。
-- **主观题别让被测模型自评**：幻觉诚实度 / 代码质量 / 翻译忠实度这类，脚本只收集产物，交人或独立更强模型盲评。
+- **主观题别让被测模型自评**：幻觉诚实度 / 代码质量 / 翻译忠实度这类，脚本只收集产物，交人或独立模型盲评。
+- **需求写太细就测不出东西**：把字段名、函数名、算法都写进需求，模型只是打字员；真实场景里用户只说想要什么，「怎么做」本来就是 agent 该扛的部分。
 
 ---
 
 ## 隐私与安全
 
 - 仓库内**不含任何 API key、代理地址或个人配置**：整个 `settings/`（含 `settings/codex`、`settings/hermes`）被忽略、只提供 `settings.example/` 占位；所有脚本的端点均可用环境变量覆盖。
-- Codex 的会话/日志（写在 `CODEX_HOME=settings/codex`）与 Hermes 的会话导出（写在 `settings/hermes`）也都落在被忽略的 `settings/` 下，不会入库。
-- `sandbox/` 里的公司/设备/人名/数值均为**评测用合成数据**，非真实信息。
+- `suites/` 里的公司 / 设备 / 人名 / 数值 / 日志全是**评测用合成数据**。
+  其中 `ops_scripts/notify.py` 里的 webhook、令牌、手机号是某道用例的靶子（「上 GitHub 前把这些摘出去」），
+  **都是编的**；文件里不加「这是假的」注释，加了就等于剧透题目。
 
 ## License
 

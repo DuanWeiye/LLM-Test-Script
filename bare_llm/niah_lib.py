@@ -1,6 +1,7 @@
 # NIAH 公共库：造含 6 情景针 + 大量相似干扰项的长文；前缀缓存复用。
 import os, json, time, urllib.request
-BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:12345/v1").rstrip("/") + "/chat/completions"
+# 采样覆盖、鉴权头、厂商专有字段、端点地址全部复用常规卷/难卷那一套，不在这里另写一份
+from eval_lib import apply_sampling, post
 # 思考模型的 reasoning 也占 max_tokens，120 是给非思考模型定的紧预算，同 eval_lib 用同一套环境变量兜底放宽。
 _MT_MULT = float(os.environ.get("EVAL_MAX_TOKENS_MULT", "1"))
 _MT_MIN = int(os.environ.get("EVAL_MAX_TOKENS_MIN", "0"))
@@ -57,18 +58,22 @@ _SYS = "你是检索助手。只输出被问到的那个具体值本身（一个
 def ask(model, doc, question, max_tokens=120):
     max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
     content = doc + "\n\n问题：" + question
-    body = json.dumps({"model": model, "messages": [
-                           {"role": "system", "content": _SYS},
-                           {"role": "user", "content": content}],
-                       "max_tokens": max_tokens, "temperature": 0,
-                       "cache_prompt": True}).encode()
-    req = urllib.request.Request(BASE, body, {"Content-Type": "application/json"})
+    body = apply_sampling({"model": model, "messages": [
+                               {"role": "system", "content": _SYS},
+                               {"role": "user", "content": content}],
+                           "max_tokens": max_tokens,
+                           "cache_prompt": True}, 0)
     t0 = time.time()
-    d = json.load(urllib.request.urlopen(req, timeout=1200))
+    d = post(body, timeout=1200)
     wall = time.time() - t0
-    t = d.get("timings", {})
+    t = d.get("timings") or {}
+    usage = d.get("usage") or {}
     msg = d["choices"][0]["message"]
-    return {"prompt_n": t.get("prompt_n"), "prefill_tps": t.get("prompt_per_second"),
-            "wall": round(wall, 1), "ans": msg["content"].strip(),
+    # 实际 token 数是长上下文这一卷的命根子(档位标签只是目标值，不同 tokenizer 差很多)：
+    # 本地 llama.cpp 记在 timings.prompt_n，云端 API 只有 usage.prompt_tokens，缺一不可。
+    return {"prompt_n": t.get("prompt_n") or usage.get("prompt_tokens"),
+            "prefill_tps": t.get("prompt_per_second"),
+            "cached_tokens": usage.get("prompt_cache_hit_tokens"),
+            "wall": round(wall, 1), "ans": (msg.get("content") or "").strip(),
             "finish_reason": d["choices"][0].get("finish_reason"),
             "reasoning_len": len(msg.get("reasoning_content") or "")}

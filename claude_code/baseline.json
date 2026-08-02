@@ -1,0 +1,285 @@
+{
+ "G2": {
+  "suite": "panel_kit",
+  "fingerprint": "f65a1f3298e20741",
+  "detail": "9/12",
+  "tests": {
+   "test_logview_fit.py::test_many_lines_fit_screen_rows": false,
+   "test_logview_fit.py::test_long_line_fits_screen_cols": false,
+   "test_logview_fit.py::test_keeps_the_recent_lines_not_the_oldest": false,
+   "test_logview_fit.py::test_folded_long_line_keeps_content": true,
+   "test_logview_fit.py::test_few_lines_all_visible": true,
+   "tests/test_basic.py::test_store_keeps_latest_per_device": true,
+   "tests/test_basic.py::test_render_lists_devices": true,
+   "tests/test_basic.py::test_screen_size_from_config": true,
+   "tests/test_basic.py::test_session_single_round": true,
+   "tests/test_basic.py::test_session_handles_partial_record": true,
+   "tests/test_basic.py::test_logview_shows_written_lines": true,
+   "tests/test_basic.py::test_cli_demo_runs": true
+  }
+ },
+ "R1": {
+  "suite": "panel_kit",
+  "fingerprint": "f65a1f3298e20741",
+  "detail": "10/12",
+  "tests": {
+   "test_panel_perf.py::test_panel_stays_fast_with_long_history": false,
+   "test_panel_perf.py::test_render_cost_does_not_grow_with_history": false,
+   "test_panel_perf.py::test_latest_values_still_correct": true,
+   "test_panel_perf.py::test_device_that_stopped_reporting_still_visible": true,
+   "test_panel_perf.py::test_small_history_unchanged": true,
+   "tests/test_basic.py::test_store_keeps_latest_per_device": true,
+   "tests/test_basic.py::test_render_lists_devices": true,
+   "tests/test_basic.py::test_screen_size_from_config": true,
+   "tests/test_basic.py::test_session_single_round": true,
+   "tests/test_basic.py::test_session_handles_partial_record": true,
+   "tests/test_basic.py::test_logview_shows_written_lines": true,
+   "tests/test_basic.py::test_cli_demo_runs": true
+  }
+ },
+ "R3": {
+  "suite": "panel_kit",
+  "fingerprint": "f65a1f3298e20741",
+  "detail": "9/11",
+  "tests": {
+   "test_session_reuse.py::test_second_session_not_polluted": false,
+   "test_session_reuse.py::test_third_session_also_clean": false,
+   "test_session_reuse.py::test_partial_record_within_session_still_works": true,
+   "test_session_reuse.py::test_drain_without_connect_still_raises": true,
+   "tests/test_basic.py::test_store_keeps_latest_per_device": true,
+   "tests/test_basic.py::test_render_lists_devices": true,
+   "tests/test_basic.py::test_screen_size_from_config": true,
+   "tests/test_basic.py::test_session_single_round": true,
+   "tests/test_basic.py::test_session_handles_partial_record": true,
+   "tests/test_basic.py::test_logview_shows_written_lines": true,
+   "tests/test_basic.py::test_cli_demo_runs": true
+  }
+ },
+ "G1": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "11/18",
+  "tests": {
+   "test_trend.py::test_new_capability_is_discoverable": false,
+   "test_trend.py::test_new_capability_runs": false,
+   "test_trend.py::test_reports_both_rising_devices": false,
+   "test_trend.py::test_does_not_mislabel_falling_device": false,
+   "test_trend.py::test_does_not_mislabel_flat_devices": false,
+   "test_trend.py::test_hot_but_flat_device_not_treated_as_rising": false,
+   "test_trend.py::test_tolerates_missing_readings": false,
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "G5": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "11/16",
+  "tests": {
+   "test_export.py::test_export_command_discoverable": false,
+   "test_export.py::test_export_produces_parsable_file": false,
+   "test_export.py::test_export_covers_all_devices": false,
+   "test_export.py::test_export_mean_skips_missing_readings": false,
+   "test_export.py::test_export_mean_correct_for_clean_devices": false,
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "R2": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "14/17",
+  "tests": {
+   "test_report_mean.py::test_report_still_runs": true,
+   "test_report_mean.py::test_device_without_missing_readings_unchanged": true,
+   "test_report_mean.py::test_device_with_one_missing_reading_fixed": false,
+   "test_report_mean.py::test_device_with_three_missing_readings_fixed": false,
+   "test_report_mean.py::test_report_matches_avg_command": false,
+   "test_report_mean.py::test_other_sections_intact": true,
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "B2": {
+  "suite": "ops_scripts",
+  "fingerprint": "24b06fcec40b9e70",
+  "detail": "7/9",
+  "tests": {
+   "test_conf_rename.py::test_warning_threshold_key_is_descriptive": false,
+   "test_conf_rename.py::test_critical_threshold_key_is_descriptive": false,
+   "test_conf_rename.py::test_threshold_value_still_78": true,
+   "test_conf_rename.py::test_legacy_config_file_still_readable": true,
+   "test_conf_rename.py::test_watch_gpu_still_runs": true,
+   "tests/test_smoke.py::test_scripts_import": true,
+   "tests/test_smoke.py::test_threshold_config_readable": true,
+   "tests/test_smoke.py::test_watch_gpu_parser_has_timeout": true,
+   "tests/test_smoke.py::test_notify_builds_request": true
+  }
+ },
+ "R4": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "13/17",
+  "tests": {
+   "test_raw_import.py::test_raw_file_is_not_empty": false,
+   "test_raw_import.py::test_normal_devices_all_present": false,
+   "test_raw_import.py::test_repeated_header_not_treated_as_data": true,
+   "test_raw_import.py::test_values_parsed_correctly": false,
+   "test_raw_import.py::test_non_numeric_temp_becomes_missing_not_crash": false,
+   "test_raw_import.py::test_clean_file_unchanged": true,
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "M1": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "11/11",
+  "tests": {
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "M2": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "14/17",
+  "tests": {
+   "test_config_driven.py::test_hot_follows_config_when_lowered": false,
+   "test_config_driven.py::test_hot_follows_config_when_raised": false,
+   "test_config_driven.py::test_report_shares_the_same_config": true,
+   "test_config_driven.py::test_voltage_floor_also_configurable": false,
+   "test_config_driven.py::test_default_behaviour_unchanged": true,
+   "test_config_driven.py::test_explicit_limit_still_wins": true,
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "C1": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "11/11",
+  "tests": {
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "C2": {
+  "suite": "metrics_cli",
+  "fingerprint": "a9749757de4fa13f",
+  "detail": "11/11",
+  "tests": {
+   "tests/test_cli.py::test_avg_lists_every_device": true,
+   "tests/test_cli.py::test_hot_respects_limit": true,
+   "tests/test_cli.py::test_report_has_sections": true,
+   "tests/test_reader.py::test_load_row_count": true,
+   "tests/test_reader.py::test_missing_temp_becomes_none": true,
+   "tests/test_reader.py::test_fields_parsed": true,
+   "tests/test_stats.py::test_average_skips_missing": true,
+   "tests/test_stats.py::test_average_all_devices_present": true,
+   "tests/test_stats.py::test_by_device_keeps_order": true,
+   "tests/test_stats.py::test_over_limit_uses_threshold": true,
+   "tests/test_stats.py::test_under_voltage": true
+  }
+ },
+ "B1": {
+  "suite": "unit_service",
+  "fingerprint": "92b7db2535db84db",
+  "detail": "9/13",
+  "tests": {
+   "test_autodir.py::test_pair_forward": false,
+   "test_autodir.py::test_pair_reverse": false,
+   "test_autodir.py::test_pair_is_not_hardcoded_to_cf": false,
+   "test_autodir.py::test_src_outside_pair_raises": false,
+   "test_autodir.py::test_explicit_dst_wins_over_pair": true,
+   "test_autodir.py::test_old_payload_unchanged": true,
+   "test_autodir.py::test_converter_signature_unchanged": true,
+   "tests/test_convert.py::test_c_to_f": true,
+   "tests/test_convert.py::test_f_to_c": true,
+   "tests/test_convert.py::test_c_to_k": true,
+   "tests/test_convert.py::test_unsupported_unit_raises": true,
+   "tests/test_convert.py::test_service_explicit": true,
+   "tests/test_convert.py::test_roundtrip": true
+  }
+ },
+ "B3": {
+  "suite": "note_store",
+  "fingerprint": "ef49378b7179c9cc",
+  "detail": "5/10",
+  "tests": {
+   "test_migrate.py::test_every_old_note_is_in_store": false,
+   "test_migrate.py::test_duplicate_note_not_duplicated": false,
+   "test_migrate.py::test_same_content_different_date_not_duplicated": false,
+   "test_migrate.py::test_old_file_is_gone": false,
+   "test_migrate.py::test_existing_entries_survived": true,
+   "test_migrate.py::test_store_api_still_works": false,
+   "tests/test_store.py::test_existing_items_loaded": true,
+   "tests/test_store.py::test_find_by_keyword": true,
+   "tests/test_store.py::test_add_is_deduped": true,
+   "tests/test_store.py::test_blank_is_rejected": true
+  }
+ }
+}

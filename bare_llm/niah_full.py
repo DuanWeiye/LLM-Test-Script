@@ -5,8 +5,12 @@ sys.path.insert(0, SCRATCH)
 from niah_lib import build_doc, ask, NEEDLES
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b"]
-LENGTHS = [8000, 64000, 160000, 224000]   # 目标 token(实际以 prompt_n 为准)
-RESULTS = f"{SCRATCH}/niah_results.json"
+# 目标 token(实际以 prompt_n 为准)。注意造文长度按固定的 1.6 字符/token 估算(见 niah_lib)，
+# 该系数随 tokenizer 而变——中文压缩率低的模型实际 token 会明显超出目标，可能撞上服务端 -c 上限报 400。
+# NIAH_LENGTHS 可只补测指定档位(逗号分隔)，避免为了一档重跑全部；NIAH_TAG 可另存结果不覆盖已有。
+LENGTHS = ([int(x) for x in os.environ["NIAH_LENGTHS"].split(",")]
+           if os.environ.get("NIAH_LENGTHS") else [8000, 64000, 160000, 224000])
+RESULTS = f"{SCRATCH}/niah_results{os.environ.get('NIAH_TAG', '')}.json"
 
 out = {}
 for model in MODELS:

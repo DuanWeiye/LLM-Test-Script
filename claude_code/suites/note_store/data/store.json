@@ -1,0 +1,10 @@
+[
+ {
+  "text": "部署脚本一律放项目目录下，别散到家目录",
+  "source": "manual"
+ },
+ {
+  "text": "改完 .py 要重启 systemd 服务才生效",
+  "source": "manual"
+ }
+]

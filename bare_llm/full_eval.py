@@ -2,7 +2,7 @@
 # 按模型分批(各只加载一次，避免 llama-swap 热切)。客观项自动判分，主观项收集留给 Claude 盲评。
 import sys, json, time, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_lib import chat, extract_code, run_code, grade_tool, TOOLS, SCRATCH
+from eval_lib import chat, extract_code, run_code, run_code_verdict, grade_tool, TOOLS, SCRATCH
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b", "qwen3-coder-next"]
 TAG = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -10,32 +10,9 @@ RESULTS = f"{SCRATCH}/ab_results{TAG}.json"
 JUDGE = f"{SCRATCH}/ab_judge_queue{TAG}.json"
 
 # ---------- 编码用例（执行判分；3 次尝试取通过数）----------
-CODE = [
- ("A1","EN","`def two_sum(nums, target):` 返回两元素相加==target 的下标 [i,j](i<j)。只给代码。",
-  "assert sorted(two_sum([2,7,11,15],9))==[0,1]\nassert sorted(two_sum([3,2,4],6))==[1,2]"),
- ("A2","EN","`def is_balanced(s):` 判断 ()[]{} 是否配对平衡，返回 bool。只给代码。",
-  "assert is_balanced('([]{})')==True\nassert is_balanced('([)]')==False\nassert is_balanced('')==True"),
- ("A3","CN","实现 `class LRUCache:`，`__init__(self,capacity)`、`get(self,key)`(不存在返回 -1)、`put(self,key,value)`，容量满淘汰最久未用。只给代码。",
-  "c=LRUCache(2)\nc.put(1,1); c.put(2,2)\nassert c.get(1)==1\nc.put(3,3)\nassert c.get(2)==-1\nassert c.get(3)==3"),
- ("A4","JP","昇順配列で値 x が最初に現れる添字を返す `def first_index(arr, x):` を実装。無ければ -1。コードのみ。",
-  "assert first_index([1,2,2,2,3],2)==1\nassert first_index([1,3,5],4)==-1\nassert first_index([],1)==-1"),
- ("A5","CN","下面的快排有 bug(会丢掉与 pivot 相等的重复元素)，请修正并返回 `def quicksort(a):`。只给修正后代码。\n```python\ndef quicksort(a):\n    if len(a)<=1: return a\n    p=a[0]\n    left=[x for x in a if x<p]\n    right=[x for x in a if x>p]\n    return quicksort(left)+[p]+quicksort(right)\n```",
-  "assert quicksort([3,1,2,3,3,1])==[1,1,2,3,3,3]\nassert quicksort([])==[]"),
- ("A6","EN","`def merge_intervals(intervals):` 合并重叠区间，返回排序后的区间列表。只给代码。",
-  "assert merge_intervals([[1,3],[2,6],[8,10]])==[[1,6],[8,10]]\nassert merge_intervals([[1,4],[4,5]])==[[1,5]]"),
- ("A7","CN","下面函数想求 1+2+...+n 但有 off-by-one bug，请修正并返回 `def sum_to_n(n):`。只给代码。\n```python\ndef sum_to_n(n):\n    t=0\n    for i in range(n): t+=i\n    return t\n```",
-  "assert sum_to_n(5)==15\nassert sum_to_n(1)==1\nassert sum_to_n(100)==5050"),
- ("A8","EN","`def parse_csv(text):` parse CSV text; SKIP any row that does not have exactly 3 comma-separated fields; return a list of 3-tuples (strings, stripped). Code only.",
-  "d='a,b,c\\nx,y\\n1, 2 , 3\\nbad\\np,q,r'\nassert parse_csv(d)==[('a','b','c'),('1','2','3'),('p','q','r')]"),
- ("A9","EN","Implement a decorator `def retry(times):` that retries the wrapped function up to `times` total attempts if it raises, returning its result; if all attempts raise, re-raise the last exception. Code only.",
-  "import itertools\nc=itertools.count()\n@retry(3)\ndef f():\n    n=next(c)\n    if n<2: raise ValueError('x')\n    return 'ok'\nassert f()=='ok'"),
- ("A10","EN","`def group_anagrams(words):` group words that are anagrams; return a list of groups (any order). Code only.",
-  "r=group_anagrams(['eat','tea','tan','ate','nat','bat'])\nkey=sorted(sorted(g) for g in r)\nassert key==sorted([sorted(x) for x in [['eat','tea','ate'],['tan','nat'],['bat']]])"),
- ("A11","CN","`def is_valid_ipv4(s):` 判断是否合法 IPv4(四段 0-255、无前导零如 01 视为非法、无多余字符)，返回 bool。只给代码。",
-  "assert is_valid_ipv4('192.168.1.1')==True\nassert is_valid_ipv4('256.1.1.1')==False\nassert is_valid_ipv4('1.2.3')==False\nassert is_valid_ipv4('01.2.3.4')==False"),
- ("A12","JP","ランレングス圧縮 `def rle_encode(s):` を実装。'aaabbc'→'a3b2c1'。コードのみ。",
-  "assert rle_encode('aaabbc')=='a3b2c1'\nassert rle_encode('')==''\nassert rle_encode('x')=='x1'"),
-]
+# CODE 卷（12 道普通单函数题）已于 2026-08-02 删除：
+# 地板模型 100% 通过，对区分模型没有价值。保留的高难题见 cases_hard.py。
+CODE = []
 
 # ---------- 工具调用用例 ----------
 TOOL = [  # (id, lang, prompt, expect_tool, required_args, expect_none)
@@ -102,16 +79,23 @@ TRI = [  # (id, lang, prompt, test)  —— 同一编码任务三语
 ]
 
 def run_code_case(model, prompt, test):
+    """三档采样各跑一次。
+
+    除原有的「几次全过」计数外，另记逐条 assert 的 partial（run_code_verdict）：
+    F2P=各条断言、P2P=代码本身跑不跑得起来。这样「能跑但边界条件错」与「根本跑不起来」
+    不再都记 0 分，在多数模型都接近满分的饱和区里仍能拉开差距。
+    """
     seeds=[(0.0,0),(0.7,2),(0.7,3)]
-    passes=0; samples=[]
+    passes=0; samples=[]; parts=[]
     for temp,seed in seeds:
         r=chat(model,prompt,temperature=temp,seed=seed,max_tokens=1500)
         if "error" in r: samples.append({"err":r["error"]}); continue
-        ok,info=run_code(extract_code(r["content"]),test)
-        passes+=1 if ok else 0
-        samples.append({"ok":ok,"info":info,"tps":r.get("tps"),
+        v=run_code_verdict(extract_code(r["content"]),test)
+        passes+=1 if v.passed else 0
+        parts.append(v.partial)
+        samples.append({"ok":v.passed,"info":v.detail,**v.as_dict(),"tps":r.get("tps"),
                          "finish_reason":r.get("finish_reason"),"reasoning_len":r.get("reasoning_len")})
-    return passes,len(seeds),samples
+    return passes,len(seeds),samples,parts
 
 def main():
     out={}; judge=[]
@@ -120,9 +104,10 @@ def main():
         out[model]={}
         # A 编码
         for cid,lang,prompt,test in CODE+TRI:
-            p,n,s=run_code_case(model,prompt,test)
-            out[model][cid]={"dim":"code","lang":lang,"pass":p,"n":n,"samples":s}
-            print(f"  [{cid}/{lang}] code pass {p}/{n}",flush=True)
+            p,n,s,parts=run_code_case(model,prompt,test)
+            pm=round(sum(parts)/len(parts),4) if parts else 0.0
+            out[model][cid]={"dim":"code","lang":lang,"pass":p,"n":n,"samples":s,"partial_mean":pm}
+            print(f"  [{cid}/{lang}] code pass {p}/{n} partial={pm}",flush=True)
         # B 工具
         for cid,lang,prompt,et,ra,en in TOOL:
             r=chat(model,prompt,tools=TOOLS,temperature=0,max_tokens=512)
@@ -156,7 +141,7 @@ def main():
                              "finish_reason":r.get("finish_reason")}
             print(f"  [{cid}/{lang}] format {'PASS' if ok else 'FAIL'}",flush=True)
         # 代码质量盲评素材：取 A3/A9 的产物留给 Claude 评质量
-        for cid in ["A3","A9","A5"]:
+        for cid in []:   # 原取自已删除的 CODE 卷
             r=chat(model,dict((c[0],c[2]) for c in CODE)[cid],temperature=0,max_tokens=1500)
             judge.append({"id":f"Q-{cid}","dim":"code_quality","lang":"-","model":model,
                           "prompt":dict((c[0],c[2]) for c in CODE)[cid],"answer":r.get("content","")})
