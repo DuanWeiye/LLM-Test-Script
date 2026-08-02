@@ -2,7 +2,8 @@
 # 按模型分批(各只加载一次，避免 llama-swap 热切)。客观项自动判分，主观项收集留给 Claude 盲评。
 import sys, json, time, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_lib import chat, extract_code, run_code, run_code_verdict, grade_tool, TOOLS, SCRATCH
+from eval_lib import (chat, extract_code, run_code, run_code_verdict, grade_tool,
+                      repeat_chat, REPEAT, TOOLS, SCRATCH)
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b", "qwen3-coder-next"]
 TAG = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -78,24 +79,30 @@ TRI = [  # (id, lang, prompt, test)  —— 同一编码任务三语
   "assert reverse_words('hello world')=='world hello'\nassert reverse_words('a b c')=='c b a'"),
 ]
 
-def run_code_case(model, prompt, test):
-    """三档采样各跑一次。
+def _infos(samples, n=2):
+    """把前几次的判分说明拼成一行，方便扫日志看它是怎么错的。"""
+    bits=[str(s.get("info") or s.get("err") or s.get("grader_error") or "") for s in samples]
+    bits=[b for b in bits if b]
+    return " ; ".join(bits[:n])
 
-    除原有的「几次全过」计数外，另记逐条 assert 的 partial（run_code_verdict）：
+
+def run_code_case(model, prompt, test):
+    """同一题按各模型推荐采样跑 REPEAT 次（seed 各不同）。
+
+    除「几次全过」计数外，另记逐条 assert 的 partial（run_code_verdict）：
     F2P=各条断言、P2P=代码本身跑不跑得起来。这样「能跑但边界条件错」与「根本跑不起来」
     不再都记 0 分，在多数模型都接近满分的饱和区里仍能拉开差距。
     """
-    seeds=[(0.0,0),(0.7,2),(0.7,3)]
     passes=0; samples=[]; parts=[]
-    for temp,seed in seeds:
-        r=chat(model,prompt,temperature=temp,seed=seed,max_tokens=1500)
+    for seed in range(1, REPEAT + 1):
+        r=chat(model,prompt,seed=seed,max_tokens=1500)
         if "error" in r: samples.append({"err":r["error"]}); continue
         v=run_code_verdict(extract_code(r["content"]),test)
         passes+=1 if v.passed else 0
         parts.append(v.partial)
         samples.append({"ok":v.passed,"info":v.detail,**v.as_dict(),"tps":r.get("tps"),
                          "finish_reason":r.get("finish_reason"),"reasoning_len":r.get("reasoning_len")})
-    return passes,len(seeds),samples,parts
+    return passes,REPEAT,samples,parts
 
 def main():
     out={}; judge=[]
@@ -108,43 +115,35 @@ def main():
             pm=round(sum(parts)/len(parts),4) if parts else 0.0
             out[model][cid]={"dim":"code","lang":lang,"pass":p,"n":n,"samples":s,"partial_mean":pm}
             print(f"  [{cid}/{lang}] code pass {p}/{n} partial={pm}",flush=True)
-        # B 工具
+        # B 工具（每题 k 次）
         for cid,lang,prompt,et,ra,en in TOOL:
-            r=chat(model,prompt,tools=TOOLS,temperature=0,max_tokens=512)
-            if "error" in r:
-                out[model][cid]={"dim":"tool","lang":lang,"pass":False,"info":r["error"]}; continue
-            ok,info=grade_tool(r,et,ra,en)
-            out[model][cid]={"dim":"tool","lang":lang,"pass":ok,"info":info,
-                             "content":r["content"][:200],"tool_calls":r.get("tool_calls"),
-                             "finish_reason":r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] tool {'PASS' if ok else 'FAIL'} | {info}",flush=True)
+            p,n,s=repeat_chat(model,prompt,
+                              lambda r,et=et,ra=ra,en=en: grade_tool(r,et,ra,en),
+                              tools=TOOLS,max_tokens=512)
+            out[model][cid]={"dim":"tool","lang":lang,"pass":p,"n":n,"samples":s}
+            print(f"  [{cid}/{lang}] tool {p}/{n} | {_infos(s)}",flush=True)
         # C 事实/幻觉
         for cid,lang,prompt,mc in FACT:
-            r=chat(model,prompt,temperature=0,max_tokens=800)
-            content=r.get("content","")
-            if mc is not None:  # 自动判
-                ok=any(k.lower() in content.lower() for k in mc)
-                out[model][cid]={"dim":"fact","lang":lang,"pass":ok,"content":content[:300],
-                                 "finish_reason":r.get("finish_reason")}
-                print(f"  [{cid}/{lang}] fact {'PASS' if ok else 'FAIL'}",flush=True)
-            else:  # 留给盲评
+            if mc is not None:  # 自动判，跑 k 次
+                p,n,s=repeat_chat(model,prompt,
+                                  lambda r,mc=mc: (any(k.lower() in (r.get("content") or "").lower()
+                                                       for k in mc),""),
+                                  max_tokens=800)
+                out[model][cid]={"dim":"fact","lang":lang,"pass":p,"n":n,"samples":s}
+                print(f"  [{cid}/{lang}] fact {p}/{n}",flush=True)
+            else:  # 留给盲评：不自动判分，跑一次收集产物即可
+                r=chat(model,prompt,seed=1,max_tokens=800)
+                content=r.get("content","")
                 out[model][cid]={"dim":"halluc","lang":lang,"pass":None,"content":content}
                 judge.append({"id":cid,"dim":"halluc","lang":lang,"model":model,"prompt":prompt,"answer":content})
                 print(f"  [{cid}/{lang}] halluc -> 收集待评({len(content)}字)",flush=True)
-        # D 格式
+        # D 格式（每题 k 次）
         for cid,lang,prompt,chk in FORMAT:
-            r=chat(model,prompt,temperature=0,max_tokens=400)
-            content=r.get("content","")
-            try: ok=bool(chk(content))
-            except Exception: ok=False
-            out[model][cid]={"dim":"format","lang":lang,"pass":ok,"content":content[:200],
-                             "finish_reason":r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] format {'PASS' if ok else 'FAIL'}",flush=True)
-        # 代码质量盲评素材：取 A3/A9 的产物留给 Claude 评质量
-        for cid in []:   # 原取自已删除的 CODE 卷
-            r=chat(model,dict((c[0],c[2]) for c in CODE)[cid],temperature=0,max_tokens=1500)
-            judge.append({"id":f"Q-{cid}","dim":"code_quality","lang":"-","model":model,
-                          "prompt":dict((c[0],c[2]) for c in CODE)[cid],"answer":r.get("content","")})
+            p,n,s=repeat_chat(model,prompt,
+                              lambda r,chk=chk: (bool(chk(r.get("content") or "")),""),
+                              max_tokens=400)
+            out[model][cid]={"dim":"format","lang":lang,"pass":p,"n":n,"samples":s}
+            print(f"  [{cid}/{lang}] format {p}/{n}",flush=True)
         json.dump(out,open(RESULTS,"w"),ensure_ascii=False,indent=1)
         json.dump(judge,open(JUDGE,"w"),ensure_ascii=False,indent=1)
     print("\n=== 全部完成，结果已存盘 ===",flush=True)

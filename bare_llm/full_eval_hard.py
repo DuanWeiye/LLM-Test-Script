@@ -2,7 +2,8 @@
 # 专挑能拉开差距的题：硬算法/多步推理/更广知识/多约束指令/更难工具/广度。
 import sys, json, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_lib import chat, extract_code, run_code, run_code_verdict, grade_tool, TOOLS, SCRATCH
+from eval_lib import (chat, extract_code, run_code, run_code_verdict, grade_tool,
+                      repeat_chat, REPEAT, TOOLS, SCRATCH)
 from cases_hard import HARD  # 保留的高难单函数题 X1~X6，与 HC 同格式
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b"]
@@ -109,10 +110,9 @@ def run_hc(model, prompt, test, forbid):
     # 注意：本 harness 不调用 eval()。forbid="eval(" 仅作"检测字符串"，
     # 用于判定模型生成的代码是否偷用 eval(HC4 要求自己解析、禁用 eval)。
     # 模型代码经 run_code 在隔离子进程+15s 超时内执行。
-    seeds = [(0.0, 0), (0.7, 2)]
     p = 0; samples = []; parts = []
-    for temp, seed in seeds:
-        r = chat(model, prompt, temperature=temp, seed=seed, max_tokens=2000)
+    for seed in range(1, REPEAT + 1):
+        r = chat(model, prompt, seed=seed, max_tokens=2000)
         if "error" in r: samples.append({"err": r["error"]}); continue
         code = extract_code(r["content"])
         # 违反禁用约束不再直接 continue：那样连「实现对不对」都测不到，一律 0 分。
@@ -127,7 +127,14 @@ def run_hc(model, prompt, test, forbid):
         parts.append(v.partial)
         samples.append({"ok": v.passed, "info": v.detail, **v.as_dict(), "tps": r.get("tps"),
                          "finish_reason": r.get("finish_reason"), "reasoning_len": r.get("reasoning_len")})
-    return p, len(seeds), samples, parts
+    return p, REPEAT, samples, parts
+
+
+def _infos(samples, n=2):
+    """把前几次的判分说明拼成一行，方便扫日志看它是怎么错的。"""
+    bits = [str(s.get("info") or s.get("err") or s.get("grader_error") or "") for s in samples]
+    bits = [b for b in bits if b]
+    return " ; ".join(bits[:n])
 
 def main():
     out = {}; judge = []
@@ -140,38 +147,37 @@ def main():
             out[model][cid] = {"dim": "hardcode", "lang": lang, "pass": p, "n": n,
                                "samples": s, "partial_mean": pm}
             print(f"  [{cid}/{lang}] hardcode {p}/{n} partial={pm}", flush=True)
-        for cid, lang, prompt, kind, exp in HR:
-            r = chat(model, prompt, temperature=0, max_tokens=1200)
+        def _grade_reason(r, kind=None, exp=None):
             ans = extract_answer(r.get("content", ""))
             ok = num_eq(ans, exp) if kind == "num" else (str(exp).lower() in ans.lower())
-            out[model][cid] = {"dim": "reason", "lang": lang, "pass": ok, "answer": ans[:60], "content": r.get("content","")[-300:],
-                               "finish_reason": r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] reason {'PASS' if ok else 'FAIL'} (ans={ans[:30]!r} exp={exp})", flush=True)
+            return ok, f"ans={ans[:30]!r}"
+        for cid, lang, prompt, kind, exp in HR:
+            p, n, s = repeat_chat(model, prompt,
+                                  lambda r, kind=kind, exp=exp: _grade_reason(r, kind, exp),
+                                  max_tokens=1200)
+            out[model][cid] = {"dim": "reason", "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] reason {p}/{n} (exp={exp}) {_infos(s)}", flush=True)
         for cid, lang, prompt, kws in K:
-            r = chat(model, prompt, temperature=0, max_tokens=400)
-            c = r.get("content", "")
-            ok = any(k.lower() in c.lower() for k in kws)
-            out[model][cid] = {"dim": "knowledge", "lang": lang, "pass": ok, "content": c[:200],
-                               "finish_reason": r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] knowledge {'PASS' if ok else 'FAIL'}", flush=True)
+            p, n, s = repeat_chat(model, prompt,
+                                  lambda r, kws=kws: (any(k.lower() in (r.get("content") or "").lower()
+                                                          for k in kws), ""),
+                                  max_tokens=400)
+            out[model][cid] = {"dim": "knowledge", "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] knowledge {p}/{n}", flush=True)
         for cid, lang, prompt, chk in IF:
-            r = chat(model, prompt, temperature=0, max_tokens=400)
-            c = r.get("content", "")
-            try: ok = bool(chk(c))
-            except Exception: ok = False
-            out[model][cid] = {"dim": "instruct", "lang": lang, "pass": ok, "content": c[:200],
-                               "finish_reason": r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] instruct {'PASS' if ok else 'FAIL'}", flush=True)
+            p, n, s = repeat_chat(model, prompt,
+                                  lambda r, chk=chk: (bool(chk(r.get("content") or "")), ""),
+                                  max_tokens=400)
+            out[model][cid] = {"dim": "instruct", "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] instruct {p}/{n}", flush=True)
         for cid, lang, prompt, et, ra, en in TT:
-            r = chat(model, prompt, tools=TOOLS, temperature=0, max_tokens=500)
-            if "error" in r: out[model][cid] = {"dim":"tool","lang":lang,"pass":False,"info":r["error"]}; continue
-            ok, info = grade_tool(r, et, ra, en)
-            out[model][cid] = {"dim": "tool", "lang": lang, "pass": ok, "info": info,
-                               "content": r.get("content","")[:160], "tool_calls": r.get("tool_calls"),
-                               "finish_reason": r.get("finish_reason")}
-            print(f"  [{cid}/{lang}] tool {'PASS' if ok else 'FAIL'} | {info}", flush=True)
+            p, n, s = repeat_chat(model, prompt,
+                                  lambda r, et=et, ra=ra, en=en: grade_tool(r, et, ra, en),
+                                  tools=TOOLS, max_tokens=500)
+            out[model][cid] = {"dim": "tool", "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] tool {p}/{n} | {_infos(s)}", flush=True)
         for cid, lang, prompt in BR:
-            r = chat(model, prompt, temperature=0, max_tokens=400)
+            r = chat(model, prompt, seed=1, max_tokens=400)
             out[model][cid] = {"dim": "breadth", "lang": lang, "pass": None, "content": r.get("content","")}
             judge.append({"id": cid, "dim": "breadth", "lang": lang, "model": model,
                           "prompt": prompt, "answer": r.get("content","")})

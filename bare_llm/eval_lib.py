@@ -10,14 +10,20 @@ SCRATCH = os.path.dirname(os.path.abspath(__file__))
 _MT_MULT = float(os.environ.get("EVAL_MAX_TOKENS_MULT", "1"))
 _MT_MIN = int(os.environ.get("EVAL_MAX_TOKENS_MIN", "0"))
 
-# 采样参数覆盖：各用例默认走温度 0（贪心）做受控对照——确定性、跨模型跨时间可比，单次即可下结论。
-# 代价是偏离各模型官方推荐设定：不少模型 generation_config 里明确 do_sample=true，贪心属于「没按说明书用」，
-# 对经 RL 对齐的模型（尤其推理/agentic 模型）可能系统性低估，低温下也更容易触发重复退化。
-# 这里允许用环境变量整体覆盖采样参数，用于跑「官方推荐设定」那一轮；不设则完全维持原有行为。
-# ⚠️ 温度 >0 时单次结果带采样方差，据此出的分必须多次取均值才可下结论，不能和温度 0 的单次分直接比。
+# 采样参数：**默认一个都不发**，让端点按各模型自己的官方推荐设定跑（2026-08-02 主人定的方向）。
+# 理由：温度 0（贪心）虽然确定性好、单次即可下结论，但它偏离各模型的 generation_config
+# ——不少模型明确 do_sample=true，贪心属于「没按说明书用」，对经 RL 对齐的模型（尤其推理/agentic）
+# 可能系统性低估，低温下还更容易触发重复退化，有些模型在温度 0 下甚至根本不能正常工作。
+# 本机 llama-swap 已给每个模型按 generation_config 配好 --temp/--top-p/--top-k，
+# 云端 API 不传即用官方默认，所以「不发」就等于「按各模型推荐值跑」，不必在评测脚本里维护温度表。
+# ⚠️ 代价：结果带采样方差，所以每题要跑多次取均值（见 REPEAT / repeat_chat）。
+# 想复现旧的温度 0 贪心对照，用 EVAL_TEMPERATURE=0 强制覆盖即可。
 _TEMP = os.environ.get("EVAL_TEMPERATURE")
 _TOP_P = os.environ.get("EVAL_TOP_P")
 _TOP_K = os.environ.get("EVAL_TOP_K")
+
+# 每道题重复几次。温度非 0 之后单次结果就是一次抽样，必须多次才能下结论。
+REPEAT = int(os.environ.get("EVAL_REPEAT", "3"))
 
 # 云端 OpenAI 兼容端点(DeepSeek 等)要 Bearer 鉴权；本地 llama-swap 不要，不设即不发该头(行为同旧版)。
 _API_KEY = os.environ.get("LLM_API_KEY", "")
@@ -25,8 +31,14 @@ _API_KEY = os.environ.get("LLM_API_KEY", "")
 # 收在这一层而不是散进各用例：关思考/调档的字段名各厂商都不同，用例不该知道后端是谁。
 _EXTRA_BODY = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))
 
-def post(body, timeout=300):
+# 单次请求的 HTTP 超时。思考模型给大 max_tokens 时一次能跑好几分钟
+# （实测某思考模型 32000 tokens 用了 261 秒），默认 300 秒会把它全判成网络错误。
+_HTTP_TIMEOUT = int(os.environ.get("EVAL_HTTP_TIMEOUT", "300"))
+
+
+def post(body, timeout=None):
     """统一出口：并入厂商专有字段 + 鉴权头后发请求。常规卷/难卷/NIAH 共用，避免各写一份。"""
+    timeout = timeout or _HTTP_TIMEOUT
     body = {**body, **_EXTRA_BODY}
     headers = {"Content-Type": "application/json"}
     if _API_KEY:
@@ -34,23 +46,31 @@ def post(body, timeout=300):
     req = urllib.request.Request(BASE, json.dumps(body).encode(), headers)
     return json.load(urllib.request.urlopen(req, timeout=timeout))
 
-# 有的思考模型服务端明确不接受采样参数（DeepSeek 思考模式文档：不支持 temperature/top_p/
-# presence_penalty/frequency_penalty）。置 1 则一个采样参数都不发，由服务端自己定。
-# ⚠️ 此时「温度 0」这个前提不成立，结果天然带采样方差，不能和温度 0 的单次分直接比。
+# 强制一个采样参数都不发，即使设了 EVAL_TEMPERATURE。
+# （有的思考模型服务端明确不接受采样参数，如 DeepSeek 思考模式不支持
+#   temperature/top_p/presence_penalty/frequency_penalty。）
+# 注意：不设这个变量时**默认也是不发**，本开关只用于压过 EVAL_TEMPERATURE 之类的显式覆盖。
 _OMIT_SAMPLING = os.environ.get("EVAL_OMIT_SAMPLING") == "1"
 
-def apply_sampling(body, temperature):
-    """落定请求体的采样参数：默认用调用方给的温度，环境变量存在则整体覆盖。"""
+def apply_sampling(body, temperature=None):
+    """落定请求体的采样参数。
+
+    默认什么都不发 —— 由端点按各模型自己的推荐设定决定。
+    只有显式给了环境变量（或调用方明确传了 temperature）才发对应参数。
+    """
     if _OMIT_SAMPLING:
         return body
-    body["temperature"] = float(_TEMP) if _TEMP is not None else temperature
+    if _TEMP is not None:
+        body["temperature"] = float(_TEMP)
+    elif temperature is not None:
+        body["temperature"] = float(temperature)
     if _TOP_P is not None:
         body["top_p"] = float(_TOP_P)
     if _TOP_K is not None:
         body["top_k"] = int(_TOP_K)
     return body
 
-def chat(model, user, system="You are a helpful assistant.", temperature=0.0,
+def chat(model, user, system="You are a helpful assistant.", temperature=None,
          seed=0, tools=None, max_tokens=1024):
     max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -83,6 +103,38 @@ def chat(model, user, system="You are a helpful assistant.", temperature=0.0,
             "reasoning_len": len(msg.get("reasoning_content") or ""),
             # 云端按 token 计费，留存 usage 以便事后核算成本；本地端点没有则为 {}
             "usage": usage}
+
+def repeat_chat(model, prompt, grade, k=None, **kw):
+    """同一道题跑 k 次、逐次判分，返回 (通过次数, k, 样本列表)。
+
+    为什么必须重复：采样参数交给各模型的推荐设定之后温度不再是 0，
+    **单次结果只是一次抽样** —— 一次对错说明不了问题，得看 k 次里对了几次。
+
+    每次用不同 seed（1..k）：既拿到采样多样性，又尽量可复现
+    （本地 llama.cpp 认 seed；云端多半忽略，那就纯随机，无妨）。
+
+    grade 是 fn(resp) -> (bool, str)，由各用例自己给。
+    """
+    k = k or REPEAT
+    n_pass, samples = 0, []
+    for i in range(k):
+        r = chat(model, prompt, seed=i + 1, **kw)
+        if "error" in r:
+            samples.append({"err": r["error"]})
+            continue
+        try:
+            ok, info = grade(r)
+        except Exception as e:                  # 判分器自己炸了，不该记成模型答错
+            samples.append({"grader_error": str(e)[:200]})
+            continue
+        n_pass += 1 if ok else 0
+        samples.append({"ok": bool(ok), "info": info,
+                        "content": (r.get("content") or "")[:300],
+                        "tool_calls": r.get("tool_calls"),
+                        "finish_reason": r.get("finish_reason"),
+                        "tps": r.get("tps")})
+    return n_pass, k, samples
+
 
 def extract_code(text):
     m = re.findall(r"```(?:python)?\s*(.*?)```", text, re.S)

@@ -58,11 +58,12 @@ _SYS = "你是检索助手。只输出被问到的那个具体值本身（一个
 def ask(model, doc, question, max_tokens=120):
     max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
     content = doc + "\n\n问题：" + question
+    # 不指定采样参数：由端点按各模型自己的推荐设定跑（与常规卷/难卷同一条件）
     body = apply_sampling({"model": model, "messages": [
                                {"role": "system", "content": _SYS},
                                {"role": "user", "content": content}],
                            "max_tokens": max_tokens,
-                           "cache_prompt": True}, 0)
+                           "cache_prompt": True})
     t0 = time.time()
     d = post(body, timeout=1200)
     wall = time.time() - t0
