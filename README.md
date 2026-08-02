@@ -197,6 +197,36 @@ python3 run_eval.py --report results/results_run1.json
 
 ---
 
+## 题库详解 `CASEBOOK.casebook`（含答案，故意不放明文）
+
+想搞懂**每道题在考什么、题面长什么样、标准答案是什么、判分器凭什么说你对或不对**，
+看这份。里面还有 F2P / P2P / partial / pass@1 / pass^k / oracle / 保管库 / 开卷闭卷
+这些概念的通俗解释。
+
+**这是一个加了密码的 zip，密码就在下面。** 解开来看：
+
+```bash
+unzip -P casebook-spoiler-2026 CASEBOOK.casebook      # 扩展名不影响，unzip 认得
+```
+
+改完之后重新打包：
+
+```bash
+zip -e -P casebook-spoiler-2026 CASEBOOK.zip CASEBOOK.md && mv -f CASEBOOK.zip CASEBOOK.casebook
+```
+
+**为什么不直接放 markdown**：这份文档写着全部题目的答案、参考解和陷阱位置。
+明文提交到公开仓库，它就会被爬进各家的预训练语料——**以后再用这套题测新模型，
+模型可能在预训练里就见过「真凶是 UTF-8 BOM」「dev-a04 长期高温但没趋势」，
+而你没有任何办法分辨它是真推理出来的还是背出来的。** 公开基准逐渐失去区分度走的就是这条路，
+本仓库的题全部自出、没搬运任何现成基准，正是为了避开它。
+
+所以做法和 `vault/` 一个思路：**挡的是漫无目的的抓取，不是有心人**。
+密码公开写在这里，人要看随时能看；而自动化的数据管线不会去读 README 找密码再解压。
+真想拿到答案的人当然拿得到——这跟 `vault/` 的定位完全一致，它挡的也只是「顺手 grep 撞见」。
+
+> 明文的 `CASEBOOK.md` 被 `.gitignore` 忽略，从未进过 git 历史。
+
 ## 隐私与安全
 
 - 仓库内**不含任何 API key、代理地址或个人配置**：整个 `settings/`（含 `settings/codex`、`settings/hermes`）被忽略、只提供 `settings.example/` 占位；所有脚本的端点均可用环境变量覆盖。
