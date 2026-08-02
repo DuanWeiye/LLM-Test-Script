@@ -4,7 +4,8 @@
 排除掉知识量、上下文长度、推理速度这些单模型指标，只看「把活交给它，它能不能干成」。
 
 > **上一版的结果全部作废**。用例形态、判分口径、隔离方式、诊断题的题目本身都换了，
-> 数字不可比。旧版整套归档在 `archive_v1/`。
+> 数字不可比，旧结果与旧文档已清理。上一版代码在 git 历史里：
+> `git show 6cca156:claude_code/eval_cases.py`（用例）、`:claude_code/run_eval.py`（引擎）。
 
 ---
 
@@ -132,8 +133,10 @@
 「日志区溢出把界面撑坏」（G2）、「有几个 url 要提出来防止隐私泄露」（G4）、
 「翻译必须指定方向」的兼容性回归（B2 同族）。工具纪律类用合成项目，那类题需要的是可控而不是真实感。
 
-**项目模板**（`suites/`）：`metrics_cli`（遥测 CLI，8 台设备 192 条读数）、
-`ops_scripts`（推理机运维脚本）、`panel_kit`（手持终端面板后端）、`gw7_field`（故障现场）。
+**项目模板**（`suites/`，共 7 个）：`metrics_cli`（遥测 CLI，8 台设备 192 条读数）、
+`ops_scripts`（推理机运维脚本）、`panel_kit`（手持终端面板后端）、
+`unit_service`（单位换算服务）、`note_store`（记忆库）、`backend_picker`（后端版本目录）、
+`gw7_field`（故障现场）。
 
 ---
 
@@ -194,7 +197,6 @@ claude-eval/
   vault/               隐藏验收测试（压缩存放）
   settings/            各模型的 endpoint 配置
   results/             评测结果
-  archive_v1/          上一版全套（结果已作废，留作对照）
 ```
 
 ---
@@ -213,10 +215,11 @@ T2 反问 ✓ 19.6s／R4 修对 BOM 17/17 ✓ 150s／E1I 闭卷命中 5/7、没�
 
 ## 六、交接：还没做的
 
-1. **正式跑一轮**。25 条、单模型约 79 次运行。本机现有三个 key
-   （`qwen3.6-35b-a3b` / `qwen3.6-35b-uncensored` / `laguna-s-2.1`）；
-   `settings/` 里还留着几个已经撤掉的模型配置（coder-next、qwythos、agentworld、
-   deepseek-v4-pro、gemini），要跑云端对照得先确认这些 endpoint 还在不在。
+1. **正式跑一轮**。25 条、单模型约 79 次运行。
+   `settings/` 已按当前实际情况清过一遍：本机三个 key（`qwen3.6-35b-a3b` /
+   `qwen3.6-35b-uncensored` / `laguna-s-2.1`）配置齐全，已撤模型（coder-next /
+   qwythos / agentworld）的配置删掉了；云端四个（sonnet / opus / deepseek-v4-pro /
+   gemini-3.5-flash）留着，但 endpoint 与 key 是否还有效要跑前确认。
    **跑完别忘了 `--judge` 给开放题判分，再 `--report` 出汇总表。**
 2. **多外壳适配（codex / hermes）这次直接覆盖掉了**。旧的 `runners.py` 依赖 bwrap，
    与新隔离方式不兼容；本套跑通之后再考虑重做。
@@ -225,16 +228,6 @@ T2 反问 ✓ 19.6s／R4 修对 BOM 17/17 ✓ 150s／E1I 闭卷命中 5/7、没�
    旧实现在 git 历史里：`git show 98d3a7a:claude_code/runners.py`。
 3. **`mining/` 里还有素材**。按 `failed_edits` 非空筛出 85 条候选，
    picokvm 的安全加固、pocketB 的 OTA 升级都能做成模糊需求题。
-
-## 八、几件容易被误会的事
-
-- **`suites/ops_scripts/notify.py` 里的 webhook / 令牌 / 手机号全是编的**，
-  是 G4 那道题的靶子（「上 GitHub 前把这些摘出去」）。文件里不写「这是假的」——
-  写了就等于剧透题目。
-- **`suites/gw7_field/` 里的 GW-7 网关、固件 3.x、槽位表都是虚构的**，
-  为的是让闭卷题真的闭卷。不要拿它当真实设备资料看。
-- **保管库不是加密**，只是压缩+base64，挡的是「顺手 grep 撞见答案」。
-  真要防铁了心作弊的 agent 得上容器。
 
 ## 七、这一版踩过并固化下来的坑
 
@@ -247,3 +240,14 @@ T2 反问 ✓ 19.6s／R4 修对 BOM 17/17 ✓ 150s／E1I 闭卷命中 5/7、没�
 - 隐藏测试注入在项目根，但文件里按 `tests/` 子目录算 ROOT → 基线全红，掩盖了真实的 F2P/P2P 划分。
 
 一句话：**这一版所有的判分 bug，都是 `--oracle` / `--baseline` 抓出来的，没有一个是靠眼睛看出来的。**
+
+## 八、几件容易被误会的事
+
+- **`suites/ops_scripts/notify.py` 里的 webhook / 令牌 / 手机号全是编的**，
+  是 G4 那道题的靶子（「上 GitHub 前把这些摘出去」）。文件里不写「这是假的」——
+  写了就等于剧透题目。
+- **`suites/gw7_field/` 里的 GW-7 网关、固件 3.x、槽位表都是虚构的**，
+  为的是让闭卷题真的闭卷。不要拿它当真实设备资料看。
+- **保管库不是加密**，只是压缩+base64，挡的是「顺手 grep 撞见答案」。
+  真要防铁了心作弊的 agent 得上容器。
+

@@ -73,5 +73,4 @@ cases/        用例定义（按维度分文件）
 suites/       用例项目模板
 vault/        隐藏验收测试（压缩存放，grep 不到）
 settings/     各模型的 endpoint 配置（含 key，不入库）
-archive_v1/   上一版（bwrap 隔离 + 精确需求形态），结果已作废，留作对照
 ```
