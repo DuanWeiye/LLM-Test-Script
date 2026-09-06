@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "_comment": "本机 llama-swap 直连（不经协议转换层）。★ 故意不写 temperature/top_p：采样一律用服务端 llama-swap config 里配的那套，与裸卷口径一致，也避免外壳偷偷改采样让两卷不可比。provider 名必须叫 local —— runner.py 按 local/<model> 拼 -m 参数。",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-swap 本机",
+      "options": { "baseURL": "http://127.0.0.1:12345/v1", "apiKey": "not-needed" },
+      "models": { "把这里换成模型 id": { "name": "把这里换成模型 id" } }
+    }
+  },
+  "model": "local/把这里换成模型 id"
+}

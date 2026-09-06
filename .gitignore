@@ -14,9 +14,25 @@ _sol.py
 _sol_verdict.py
 
 # 真实 settings（含各自的 key/代理地址）——只提交 settings.example/
-claude_code/settings/
+agent/settings/
 
 # 题库详解：写着全部题目答案与参考解。明文不入库，否则会被爬进预训练语料，
 # 以后这套题对新模型就失效了。入库的是加密包 CASEBOOK.casebook（密码见 README）。
 CASEBOOK.md
 
+
+# opencode 外壳二进制（npm 装的 arm64 包，不入库）
+vendor/
+# 跑批工作区：里面有真实 settings 的现场副本（含 key）、模型原始输出、事故证物，
+# 一律不入库。要复用的驱动脚本请另外放到框架目录里。
+runs/
+
+# 带日期后缀的手工备份（make_report.py.bak.20260905 之类），只留本机
+*.bak.*
+
+# 评测结果与报告：本仓库是公开的，报告里逐题讨论失败模式＝半张答案，
+# 与 CASEBOOK.md 同一个理由，只留在本机。
+RESULTS.md
+评测报告-*.md
+交接-*.md
+事故报告-*.md

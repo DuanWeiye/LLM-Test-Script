@@ -321,7 +321,7 @@ def cmd_report(paths) -> int:
 
 
 # ---------- 正式评测 ----------
-def cmd_run(models, cases, stamp, k_override) -> int:
+def cmd_run(models, cases, stamp, k_override, effort=None) -> int:
     RESULTS.mkdir(exist_ok=True)
     out_path = RESULTS / f"results_{stamp}.json"
     out = {}
@@ -341,7 +341,8 @@ def cmd_run(models, cases, stamp, k_override) -> int:
             for i in range(k):
                 work = workspace.prepare(case.suite, drop=case.drop)
                 try:
-                    run_out = runner.run_claude(model, case.prompt, work, timeout=case.timeout)
+                    run_out = runner.run_claude(model, case.prompt, work,
+                                                timeout=case.timeout, effort=effort)
                     ctx = case_lib.make_ctx(case, work, run_out)
                     v = case_lib.grade(case, ctx)
                     rec = {**v.as_dict(),
@@ -350,6 +351,10 @@ def cmd_run(models, cases, stamp, k_override) -> int:
                            "wall": round(ctx["wall"], 1),
                            "changed": ctx["diff"],
                            "result_head": ctx["result"][:800]}
+                    if effort:
+                        # 记在 run 级而不是文件级：加文件级元信息键会被 --judge / --report
+                        # 的「遍历每个键都当用例」逻辑吃掉
+                        rec["effort"] = effort
                     if case.is_open_ended:
                         rec["result_full"] = ctx["result"]   # 供离线裁判判分/重判
                 finally:
@@ -388,6 +393,11 @@ def main():
     ap.add_argument("--judge", metavar="RESULTS_JSON", help="离线给开放题判分")
     ap.add_argument("--judge-check", action="store_true", help="考一考裁判自己")
     ap.add_argument("--report", nargs="+", metavar="RESULTS_JSON", help="把结果汇总成 markdown")
+    ap.add_argument("--effort", metavar="VARIANT",
+                    help="思考档位，走 opencode 的 --variant（取值由 provider 定，"
+                         "如 minimal/high/max）。不传＝不加这个参数，用服务端配的档位。"
+                         "★ 本机 llama-swap 的档位是服务端配的，传了未必生效 —— "
+                         "做档位对照前先确认它真传下去了，别拿没生效的旋钮下结论")
     args = ap.parse_args()
 
     sel = select(args.cases)
@@ -405,7 +415,7 @@ def main():
         raise SystemExit(cmd_report(args.report))
     if not args.models:
         ap.error("跑模型评测必须给 --models（或用 --baseline / --oracle / --self-check 自检）")
-    raise SystemExit(cmd_run(args.models.split(","), sel, args.stamp, args.k))
+    raise SystemExit(cmd_run(args.models.split(","), sel, args.stamp, args.k, args.effort))
 
 
 if __name__ == "__main__":

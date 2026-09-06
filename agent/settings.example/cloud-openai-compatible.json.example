@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "_comment": "云端 OpenAI 兼容端点示例。key 走 {env:VAR} 引用，别写死在文件里——settings/ 虽已被 .gitignore 忽略，但示例文件是入库的。provider 名同样必须叫 local。",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "某云端服务",
+      "options": { "baseURL": "https://api.example.com/v1", "apiKey": "{env:MY_API_KEY}" },
+      "models": { "some-model-id": { "name": "some-model-id" } }
+    }
+  },
+  "model": "local/some-model-id"
+}

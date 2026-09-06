@@ -1,11 +1,87 @@
-# claude-eval · 设计说明（2026-08-02 重写版）
+# agent-eval · 设计说明（2026-08-02 重写版 / 2026-09-06 换壳）
 
-同一个 Claude Code 外壳，只换底层模型 endpoint，比 **agent 场景下的真实差距**。
+同一个 **opencode** 外壳，只换底层模型 endpoint，比 **agent 场景下的真实差距**。
 排除掉知识量、上下文长度、推理速度这些单模型指标，只看「把活交给它，它能不能干成」。
 
 > **上一版的结果全部作废**。用例形态、判分口径、隔离方式、诊断题的题目本身都换了，
 > 数字不可比，旧结果与旧文档已清理。上一版代码在 git 历史里：
 > `git show 6cca156:claude_code/eval_cases.py`（用例）、`:claude_code/run_eval.py`（引擎）。
+
+---
+
+## 〇之二、2026-09-06 事故与隔离三层（**动 runner 前必读**）
+
+换壳后的第一轮正式评测，25 条用例**全部在真仓库里跑**，没在 `/tmp` 工作目录里 ——
+模型读到了 `CASEBOOK.md`、dump 了 `vault/` 的隐藏测试、改了题目模板，
+还在仓库里 `git commit` + `git reset --hard` 冲掉了一整天的未提交改动。那轮成绩已作废。
+
+**根因不是配置放错，是 `PWD`**：`subprocess.run(cwd=...)` 改真 cwd 但不改 `PWD` 环境变量，
+opencode 认 `PWD`，于是它以为自己在 `run_eval.py` 的启动目录（`<repo>/agent`）里。
+
+现在 `core/runner.py` 里有三层，改那个文件前先看懂它们分别挡什么：
+
+1. **`_env()` 里 `env["PWD"] = str(cwd)` + `_isolated_oc_env()`** —— 前者是根因修复，
+   后者把 opencode 的 config / config_dir / XDG 目录整套挪到 `/tmp/oceval-xxx`（跑完即删），
+   仓库里不再有任何 opencode 认得的东西。**这一行 PWD 千万别删**。
+2. **写屏障 `_sandbox_prefix()` / `_readonly_framework()`**，两档且开跑时会打印当前档位：
+   `bwrap`（内核级只读 + 仓库被 tmpfs 盖掉，连读都读不到，需一次 sudo 放开 AppArmor）、
+   `chmod`（免 sudo 兜底：摘掉整仓库写位，答案册/出题源/保管库连读位一起摘）。
+   `EVAL_SANDBOX=auto|bwrap|chmod|none` 可选，**没有静默降级这一档**。
+3. **`_framework_fingerprint()` 哨兵** —— 每次运行前后对框架树（含 `.git` 的 HEAD/index/refs）
+   算内容指纹，对不上立即抛错中止整轮。这次是两小时后靠人眼发现的，不能再指望人眼。
+
+完整经过、证据与恢复方法见仓库根的《事故报告-模型越狱改仓库-20260906.md》。
+
+## 〇、2026-09-06：外壳从 Claude Code 换成 opencode
+
+**为什么换**：降低「模型针对某个外壳做过专门优化」对结论的污染。本机已经撞过两次 ——
+Tiel-Coder(Ornith 微调) 的归因是「朝 agentic harness 收敛」；froggeric 模板在 27B 上净扣
+4~7 分、在 35B 上反而 +10。外壳与模板的耦合不止一次动摇过结论。
+
+**顺带消掉一层失真**：CC 只认 Anthropic 协议，本机模型得经 LiteLLM(127.0.0.1:1235) 转一道；
+opencode 原生吃 OpenAI 兼容端点，**直连 llama-swap 12345**，工具调用不再过翻译层。
+
+**判分侧零改动**。`cases/` 从来只看 `len(ctx["tools"])`、`ctx["result"]` 和文件树 diff，
+**不认工具名** —— 这条当初为「只测外部可观察行为」定的规矩，换壳时白赚了一次红利。
+新写用例时请继续守住它：一旦按工具名判分，下次换壳就得改一遍全部用例。
+
+### 防泄题：三条通道，实测过的
+
+opencode 的规则文件加载比 CC 激进得多。**每一条都是实测的**（放一句独特口令当探针，
+再问模型知不知道），不是看文档推断的：
+
+| 通道 | 实测结果 | 封堵 |
+|---|---|---|
+| 全局 `~/.config/opencode/AGENTS.md` | 泄 | `OPENCODE_CONFIG_DIR` 指向空的 `oc_home/` ✓ |
+| **`~/.claude/CLAUDE.md`**（CC 兼容 fallback） | **泄**，模型原话「根据 CLAUDE.md 中的信息……」 | `OPENCODE_DISABLE_CLAUDE_CODE=1` ✓ |
+| **父目录向上遍历 AGENTS.md** | **泄，且封不掉** | 只能靠 `runner._assert_clean_ancestry()` 扫父链报错 |
+
+第二条正是当年真的泄过题的那个文件（全局 CLAUDE.md 里就写着某道诊断题的答案）——
+换壳等于把那个洞重新打开了一次，靠环境变量才堵上。
+
+第三条要特别说清楚：**opencode 把祖先目录的规则文件全部收集起来拼接，不是就近优先**。
+试过在工作目录里放一份自己的 AGENTS.md 想截断，父目录那份照样被读进去。而工作目录在
+`/tmp/wk-xxx/<项目名>` 下，`/tmp` 是任何进程都能写的公共目录。所以每次运行前扫父链，
+**发现规则文件直接报错中止，不继续跑** —— 宁可停下来，也不要产出一份不知道被污染过的成绩单。
+看到这个报错不要绕过它，去把那个文件移走。
+
+### 两个必须知道的口径差异
+
+- **token 用量要跨 step 累加**。opencode 按步给量且 input 是增量（第二步 `input=81` 而
+  `cache.read=10156`），CC 是在 result 里一次性给总量。`_parse_events()` 已经累加成 CC 的口径，
+  但自己解析原始事件流时别踩。
+- **采样参数没有被外壳覆盖**（已验证）。跑完查 `/upstream/<model>/slots` 拿到
+  temp 1.0 / top_p 0.95 / **top_k 20** —— top_k 是 OpenAI API 根本没有的参数，
+  它出现就证明服务端配的那套原样生效了。所以本卷与裸卷的采样口径一致、可比。
+  `settings/*.json` 里**故意不写** temperature/top_p，别去加。
+
+### 还没做的
+
+- **超时倍数要重新标定**。`EVAL_AGENT_TIMEOUT_MULT` 那套数字是按 CC 的每轮开销定的，
+  opencode 未必一样。第一轮正式评测跑完要复核「中断」的比例，别无脑放大倍数掩盖问题。
+- **`--variant` 是否真生效没验证**。它是 CC `--effort` 的对应物，但本机 llama-swap 的
+  思考档位是服务端配的，传下去未必认。做档位对照前先确认，别拿没生效的旋钮下结论。
+- **换壳前的 agent 卷成绩与本卷不可比**，RESULTS.md 里那 8 列是 CC 外壳下的数字。
 
 ---
 
@@ -56,8 +132,9 @@
 | 验收测试 | 压缩+base64 存 `vault/`，判分时才在内存解开、临时注入、跑完删 | 磁盘上 grep 不到 `def test_` / 断言值 / 设备号 |
 | 外部资料 | 诊断题的资料放在项目内部，闭卷用 `drop=["docs"]` 拿掉 | 不必遮蔽 `~/Documents/md`，也就不需要 mount namespace |
 
-外加 `--setting-sources project`：不加载用户级 `~/.claude/CLAUDE.md`
-（旧版真的因此泄过题 —— 全局 CLAUDE.md 里就写着某道诊断题的答案）。
+外加外壳级的防泄题开关（CC 时代是 `--setting-sources project`，opencode 换成
+`OPENCODE_CONFIG_DIR` + `OPENCODE_DISABLE_CLAUDE_CODE` + 父链扫描，见第〇节）：
+不加载用户级 `~/.claude/CLAUDE.md`（旧版真的因此泄过题 —— 全局 CLAUDE.md 里就写着某道诊断题的答案）。
 
 保管库的定位要说清楚：这是**防止模型顺手 grep 撞见答案**，不是密码学保护。
 一个铁了心作弊的 agent 仍可能解开它；评测面对的是正常干活的模型，这个强度够用。
@@ -190,12 +267,13 @@ claude-eval/
     workspace.py       /tmp 工作目录、模板还原、文件树 diff
     pytest_runner.py   跑测试拿逐条结果、隐藏测试注入
     vault.py           隐藏资产保管库
-    runner.py          调 Claude Code（无 bwrap）
+    runner.py          调 opencode（无 bwrap，含父链泄题扫描）
     judge.py           LLM-judge + 裁判自检
   cases/               用例定义（按维度分文件）
   suites/              用例项目模板
   vault/               隐藏验收测试（压缩存放）
-  settings/            各模型的 endpoint 配置
+  settings/            各模型的 opencode 配置（provider baseURL/模型 id）
+  oc_home/             opencode 隔离配置目录，必须保持为空
   results/             评测结果
 ```
 

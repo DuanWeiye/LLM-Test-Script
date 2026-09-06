@@ -6,7 +6,7 @@
 1. **git 仓库本身是泄题面**：模型可以 `git log` / `git diff` 看出哪些是「原始基线」、
    哪些是它自己刚改的，甚至从提交历史里看出用例意图。复制出来的目录没有 .git，什么都看不出。
 2. **还原更彻底**：删目录重新复制，不存在 `git clean` 漏掉的残留状态。
-3. **路径不暴露评测框架**：目录名形如 `/tmp/wk-1a2b3c4d/telemetry_kit`，与 claude-eval 无关联，
+3. **路径不暴露评测框架**：目录名形如 `/tmp/wk-1a2b3c4d/telemetry_kit`，与本评测框架无关联，
    模型没有任何线索能顺着 cwd 摸到隐藏验收测试。这是删掉 bwrap（及其 sudo 依赖）的关键一环。
 """
 from __future__ import annotations

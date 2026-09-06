@@ -1,13 +1,16 @@
-# claude-eval
+# agent-eval
 
-同一个 Claude Code 外壳，只换底层模型 endpoint，比 **agent 场景下的真实差距**。
+同一个 **opencode** 外壳，只换底层模型 endpoint，比 **agent 场景下的真实差距**。
+
+> 2026-09-06 从 Claude Code 换成 opencode，原因与实测见 DESIGN.md 的「换壳」一节。
+> **换壳前的成绩与本卷不可比**，RESULTS.md 里的 agent 卷旧列已标注。
 
 设计说明、用例清单、判分口径、踩过的坑都在 **[DESIGN.md](DESIGN.md)**，接手先读那个。
 
 ## 跑一轮的完整流程
 
 ```bash
-cd ~/Documents/dgx/claude-eval
+cd ~/Documents/LLM-Test-Script/agent
 
 # 1) 跑前先过自检（前两步不花 LLM，几分钟）——确认框架本身是好的
 python3 run_eval.py --baseline               # 量基线 + 用例设计体检
@@ -27,7 +30,8 @@ python3 run_eval.py --report results/results_run1.json
 ```
 
 **不需要任何 sudo / sysctl。** 隔离靠「/tmp 中性工作目录 + 验收测试存保管库 +
-`--setting-sources project`」三层。
+opencode 防泄题三件套（`OPENCODE_CONFIG_DIR` / `OPENCODE_DISABLE_CLAUDE_CODE` / 父链扫描）」三层。
+**父链上出现 AGENTS.md 会直接报错中止**——那不是误报，是在替你挡一次静默污染，见 DESIGN.md。
 
 ### 报告怎么读
 
@@ -72,5 +76,6 @@ core/         判分口径、基线快照、工作目录、保管库、裁判
 cases/        用例定义（按维度分文件）
 suites/       用例项目模板
 vault/        隐藏验收测试（压缩存放，grep 不到）
-settings/     各模型的 endpoint 配置（含 key，不入库）
+settings/     各模型的 opencode 配置（provider baseURL / 模型 id，不入库）
+oc_home/      opencode 的隔离配置目录，必须保持为空（防全局 AGENTS.md 泄题）
 ```
