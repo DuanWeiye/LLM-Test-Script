@@ -25,6 +25,13 @@ _TOP_K = os.environ.get("EVAL_TOP_K")
 # 每道题重复几次。温度非 0 之后单次结果就是一次抽样，必须多次才能下结论。
 REPEAT = int(os.environ.get("EVAL_REPEAT", "3"))
 
+# seed 起点。默认 0 → seed 用 1..REPEAT。
+# 想给同一个模型再跑一轮**独立**样本（例如判断某处差异是真信号还是采样噪声）时，
+# 设 EVAL_SEED_BASE=3 就拿到 seed 4..6，与上一轮不重叠，两轮结果可直接合并成 2×REPEAT 次采样。
+# 注意：本地 llama.cpp 认 seed 但并发 slot / 批处理下并非严格确定，相同 seed 重跑结果也会变；
+# 换 seed 是为了让「独立性」在口径上站得住，不是因为相同 seed 一定复现。
+SEED_BASE = int(os.environ.get("EVAL_SEED_BASE", "0"))
+
 # 云端 OpenAI 兼容端点(DeepSeek 等)要 Bearer 鉴权；本地 llama-swap 不要，不设即不发该头(行为同旧版)。
 _API_KEY = os.environ.get("LLM_API_KEY", "")
 # 厂商专有请求字段(如 DeepSeek 关思考的 thinking:{type:disabled})，JSON 对象字符串，整体并进请求体。
@@ -70,10 +77,11 @@ def apply_sampling(body, temperature=None):
         body["top_k"] = int(_TOP_K)
     return body
 
-def chat(model, user, system="You are a helpful assistant.", temperature=None,
-         seed=0, tools=None, max_tokens=1024):
+def _one_call(model, msgs, temperature=None, seed=0, tools=None, max_tokens=1024):
+    """发一次请求并解析响应。单轮 chat 与多轮 chat_turns 共用这个核心，
+    保证两者的采样口径、max_tokens 处理、诊断字段完全一致 ——
+    分成两份实现迟早会漂，而口径不一致的两组数字是不能放进同一张表的。"""
     max_tokens = max(int(max_tokens * _MT_MULT), _MT_MIN, max_tokens)
-    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     body = apply_sampling({"model": model, "messages": msgs,
                            "max_tokens": max_tokens, "stream": False}, temperature)
     if seed:
@@ -104,13 +112,79 @@ def chat(model, user, system="You are a helpful assistant.", temperature=None,
             # 云端按 token 计费，留存 usage 以便事后核算成本；本地端点没有则为 {}
             "usage": usage}
 
+
+def chat(model, user, system="You are a helpful assistant.", temperature=None,
+         seed=0, tools=None, max_tokens=1024):
+    """单轮：一条 system + 一条 user。行为与重构前完全一致。"""
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    return _one_call(model, msgs, temperature=temperature, seed=seed,
+                     tools=tools, max_tokens=max_tokens)
+
+
+def chat_turns(model, turns, system="You are a helpful assistant.", temperature=None,
+               seed=0, tools=None, max_tokens=1024):
+    """多轮对话：`turns` 是按顺序发出的 user 消息列表，返回每轮的响应列表。
+
+    **为什么要有多轮**：现有裸卷 100% 是单轮题，而真实使用几乎全是长对话 ——
+    「早先定下的约定，聊了几轮之后还守不守」「被无关内容干扰后，早期的事实还记不记得」
+    「后面改了主意，模型跟不跟得上」这三件事单轮题一个都测不到，
+    偏偏它们才是日常用起来最常翻车的地方。
+
+    把模型自己的回复接回历史（只回传 `content`，**不回传 `reasoning_content`** ——
+    思考模型的官方用法就是多轮不回传思考内容，回传反而会让它把上一轮的草稿当成事实）。
+
+    任何一轮出错就停下并把错误记在该轮，后面的轮次不再发 —— 历史断了以后
+    再发下去，测的就不是同一件事了。
+    """
+    msgs = [{"role": "system", "content": system}]
+    out = []
+    for user in turns:
+        msgs.append({"role": "user", "content": user})
+        r = _one_call(model, msgs, temperature=temperature, seed=seed,
+                      tools=tools, max_tokens=max_tokens)
+        out.append(r)
+        if "error" in r:
+            break
+        msgs.append({"role": "assistant", "content": r.get("content") or ""})
+    return out
+
+
+def repeat_turns(model, turns, grade, k=None, **kw):
+    """多轮题跑 k 次、逐次判分，返回 (通过次数, k, 样本列表)。
+
+    与 repeat_chat 同构，区别是 `grade` 收到的是**整轮对话的响应列表**
+    （fn(responses) -> (bool, str)），因为多轮题的判据往往要看最后一轮、
+    也可能要看中间轮有没有提前崩。
+    """
+    k = k or REPEAT
+    n_pass, samples = 0, []
+    for i in range(k):
+        rs = chat_turns(model, turns, seed=SEED_BASE + i + 1, **kw)
+        err = next((r["error"] for r in rs if "error" in r), None)
+        if err:
+            samples.append({"err": err, "turns_done": len(rs)})
+            continue
+        try:
+            ok, info = grade(rs)
+        except Exception as e:                  # 判分器自己炸了，不该记成模型答错
+            samples.append({"grader_error": str(e)[:200]})
+            continue
+        n_pass += 1 if ok else 0
+        samples.append({"ok": bool(ok), "info": info,
+                        "turns": len(rs),
+                        "last": (rs[-1].get("content") or "")[:300],
+                        "finish_reason": rs[-1].get("finish_reason"),
+                        "tps": rs[-1].get("tps")})
+    return n_pass, k, samples
+
+
 def repeat_chat(model, prompt, grade, k=None, **kw):
     """同一道题跑 k 次、逐次判分，返回 (通过次数, k, 样本列表)。
 
     为什么必须重复：采样参数交给各模型的推荐设定之后温度不再是 0，
     **单次结果只是一次抽样** —— 一次对错说明不了问题，得看 k 次里对了几次。
 
-    每次用不同 seed（1..k）：既拿到采样多样性，又尽量可复现
+    每次用不同 seed（SEED_BASE+1 .. SEED_BASE+k）：既拿到采样多样性，又尽量可复现
     （本地 llama.cpp 认 seed；云端多半忽略，那就纯随机，无妨）。
 
     grade 是 fn(resp) -> (bool, str)，由各用例自己给。
@@ -118,7 +192,7 @@ def repeat_chat(model, prompt, grade, k=None, **kw):
     k = k or REPEAT
     n_pass, samples = 0, []
     for i in range(k):
-        r = chat(model, prompt, seed=i + 1, **kw)
+        r = chat(model, prompt, seed=SEED_BASE + i + 1, **kw)
         if "error" in r:
             samples.append({"err": r["error"]})
             continue
@@ -134,6 +208,34 @@ def repeat_chat(model, prompt, grade, k=None, **kw):
                         "finish_reason": r.get("finish_reason"),
                         "tps": r.get("tps")})
     return n_pass, k, samples
+
+
+def _strip_latex(text):
+    """把 LaTeX 数学记法压回普通文本，供关键词匹配用。
+
+    起因（2026-08-17）：K4 问堆排序最坏复杂度，模型三次都答对，但其中两次写成
+    `**$O(n \\log n)$**`，朴素子串匹配 `"n log n"` 匹配不到 `n \\log n`，**被判成答错**。
+    这是 README 里写的「关键词判对错必有假阳性」的镜像 —— 假阴性，而且专坑
+    「爱用 LaTeX 写数学」的模型，等于按输出风格而不是按对错给分。
+
+    做的是纯记法归一化，**不放宽语义**：去掉数学定界符、把 `\\log` 之类的命令名
+    还原成裸词、折叠空白。答案本身错的照样匹配不上。
+    """
+    s = text.replace("\\(", " ").replace("\\)", " ").replace("\\[", " ").replace("\\]", " ")
+    s = re.sub(r"\\[,;:!]", " ", s)          # 间距命令 \, \; \: \!
+    s = re.sub(r"\\([a-zA-Z]+)", r"\1", s)   # \log -> log, \times -> times
+    s = s.replace("$", " ").replace("{", " ").replace("}", " ")
+    return re.sub(r"\s+", " ", s)
+
+
+def contains_kw(content, kws):
+    """关键词判分统一入口：原文与 LaTeX 归一化后的文本，任一命中即算命中。
+
+    保留原文匹配是为了**不破坏历史可比性** —— 旧口径能过的，新口径一定也过。
+    """
+    c = (content or "").lower()
+    n = _strip_latex(c)
+    return any(k.lower() in c or k.lower() in n for k in kws)
 
 
 def extract_code(text):

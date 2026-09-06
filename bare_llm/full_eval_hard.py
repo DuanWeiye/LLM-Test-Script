@@ -3,8 +3,13 @@
 import sys, json, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_lib import (chat, extract_code, run_code, run_code_verdict, grade_tool,
-                      repeat_chat, REPEAT, TOOLS, SCRATCH)
-from cases_hard import HARD  # 保留的高难单函数题 X1~X6，与 HC 同格式
+                      repeat_chat, repeat_turns, contains_kw, REPEAT, SEED_BASE,
+                      TOOLS, SCRATCH)
+from cases_hard import HARD    # 保留的高难单函数题 X1~X6，与 HC 同格式
+from cases_multi import MULTI  # 多轮一致性 MT1~MT4（2026-09-06 新增）
+from cases_longctx import (build_long_doc, ask_long, LONG_CASES,  # 长上下文推理 LR1~LR4
+                           TARGET_TOKENS)
+from cases_conflict import CONFLICT  # 约束冲突 IFC1~IFC4（含无冲突对照组）
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b"]
 TAG = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -144,9 +149,14 @@ def main():
         for cid, lang, prompt, test, forbid in HC + HARD:
             p, n, s, parts = run_hc(model, prompt, test, forbid)
             pm = round(sum(parts) / len(parts), 4) if parts else 0.0
-            out[model][cid] = {"dim": "hardcode", "lang": lang, "pass": p, "n": n,
+            # ★ 2026-09-06：HC（基础算法）与 X（高难算法）分成两个维度。
+            #   实测 HC 已经彻底饱和（96%~100%），而 X 的跨度是 8%~78% ——
+            #   混在一个维度里，HC 的满分会把 X 的区分度稀释掉一多半。
+            #   HC 归回归卷（只用来发现退步），X 留在主卷当区分器。
+            dim = "hardcode_x" if cid.startswith("X") else "hardcode"
+            out[model][cid] = {"dim": dim, "lang": lang, "pass": p, "n": n,
                                "samples": s, "partial_mean": pm}
-            print(f"  [{cid}/{lang}] hardcode {p}/{n} partial={pm}", flush=True)
+            print(f"  [{cid}/{lang}] {dim} {p}/{n} partial={pm}", flush=True)
         def _grade_reason(r, kind=None, exp=None):
             ans = extract_answer(r.get("content", ""))
             ok = num_eq(ans, exp) if kind == "num" else (str(exp).lower() in ans.lower())
@@ -159,8 +169,7 @@ def main():
             print(f"  [{cid}/{lang}] reason {p}/{n} (exp={exp}) {_infos(s)}", flush=True)
         for cid, lang, prompt, kws in K:
             p, n, s = repeat_chat(model, prompt,
-                                  lambda r, kws=kws: (any(k.lower() in (r.get("content") or "").lower()
-                                                          for k in kws), ""),
+                                  lambda r, kws=kws: (contains_kw(r.get("content"), kws), ""),
                                   max_tokens=400)
             out[model][cid] = {"dim": "knowledge", "lang": lang, "pass": p, "n": n, "samples": s}
             print(f"  [{cid}/{lang}] knowledge {p}/{n}", flush=True)
@@ -176,6 +185,40 @@ def main():
                                   tools=TOOLS, max_tokens=500)
             out[model][cid] = {"dim": "tool", "lang": lang, "pass": p, "n": n, "samples": s}
             print(f"  [{cid}/{lang}] tool {p}/{n} | {_infos(s)}", flush=True)
+        # 约束冲突：注意 IFC4 是**无冲突对照组**，误报也算错 —— 没有它的话，
+        # 模型只要见到长约束列表就喊「有冲突」即可满分。
+        for cid, lang, prompt, grade, mt in CONFLICT:
+            p, n, s = repeat_chat(model, prompt, grade, max_tokens=mt)
+            out[model][cid] = {"dim": "conflict", "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] conflict {p}/{n} | {_infos(s)}", flush=True)
+        # 长上下文推理：接替已退役的 NIAH。整卷共用同一篇台账长文 ——
+        # 文档放在 prompt 最前且逐题不变，前缀缓存命中后一个模型只 prefill 一次
+        # （首问约 2~5 分钟，之后每问 1~2 秒；别为了省事把问题塞到文档前面，那样缓存全废）。
+        doc = build_long_doc()
+        first_lr = True
+        for cid, lang, q, grade, mt in LONG_CASES:
+            pp, ss = 0, []
+            for i in range(REPEAT):
+                try:
+                    r = ask_long(model, doc, q, max_tokens=mt, seed=SEED_BASE + i + 1)
+                except Exception as e:
+                    ss.append({"err": str(e)[:200]}); continue
+                ok, info = grade(r["ans"])
+                pp += 1 if ok else 0
+                ss.append({"ok": bool(ok), "info": info, "content": r["ans"][:300],
+                           "finish_reason": r.get("finish_reason"),
+                           "prompt_total": r.get("prompt_total")})
+                if first_lr:
+                    print(f"  (长文实际 {r.get('prompt_total')} tok，目标 {TARGET_TOKENS})", flush=True)
+                    first_lr = False
+            out[model][cid] = {"dim": "longctx", "lang": lang, "pass": pp, "n": REPEAT, "samples": ss}
+            print(f"  [{cid}/{lang}] longctx {pp}/{REPEAT} | {_infos(ss)}", flush=True)
+        # 多轮一致性：唯一走 repeat_turns 的一组（grade 收的是整轮对话的响应列表）。
+        # max_tokens 给得比单轮题宽：四轮累计下来，最后一轮的上文已经不短了。
+        for cid, lang, turns, grade, mt, dim in MULTI:
+            p, n, s = repeat_turns(model, turns, grade, max_tokens=mt)
+            out[model][cid] = {"dim": dim, "lang": lang, "pass": p, "n": n, "samples": s}
+            print(f"  [{cid}/{lang}] {dim} {p}/{n} | {_infos(s)}", flush=True)
         for cid, lang, prompt in BR:
             r = chat(model, prompt, seed=1, max_tokens=400)
             out[model][cid] = {"dim": "breadth", "lang": lang, "pass": None, "content": r.get("content","")}

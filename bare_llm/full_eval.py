@@ -3,7 +3,7 @@
 import sys, json, time, re, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_lib import (chat, extract_code, run_code, run_code_verdict, grade_tool,
-                      repeat_chat, REPEAT, TOOLS, SCRATCH)
+                      repeat_chat, contains_kw, REPEAT, TOOLS, SCRATCH)
 
 MODELS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["qwen3.6-35b-a3b", "qwen3-coder-next"]
 TAG = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -126,8 +126,7 @@ def main():
         for cid,lang,prompt,mc in FACT:
             if mc is not None:  # 自动判，跑 k 次
                 p,n,s=repeat_chat(model,prompt,
-                                  lambda r,mc=mc: (any(k.lower() in (r.get("content") or "").lower()
-                                                       for k in mc),""),
+                                  lambda r,mc=mc: (contains_kw(r.get("content"), mc),""),
                                   max_tokens=800)
                 out[model][cid]={"dim":"fact","lang":lang,"pass":p,"n":n,"samples":s}
                 print(f"  [{cid}/{lang}] fact {p}/{n}",flush=True)
