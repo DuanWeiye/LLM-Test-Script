@@ -50,9 +50,10 @@ opencode 的规则文件加载比 CC 更激进，2026-09-06 逐条实测过三�
   1. `_isolated_oc_env()`：每次运行现造一套 **完全在 /tmp、且不在任何 git 仓库里** 的
      opencode 配置目录（config / config_dir / XDG data / cache 全在里面），
      跑完即删。仓库里不再有任何 opencode 认得的东西。
-  2. `_sandbox_prefix()`：用 **bwrap** 把整个文件系统只读挂载，只有本次工作目录与
-     那套临时配置目录可写。就算模型想写仓库，内核层面写不动。
-     bwrap 不可用时**不静默降级**——`EVAL_REQUIRE_SANDBOX=0` 才允许裸跑。
+  2. `_sandbox_prefix()`：写屏障，三档（docker / bwrap / chmod，见下方「写屏障」一节）。
+     默认 auto 选最强的一档，**绝不静默降级**：开跑先打印当前在哪一档。
+     docker 档最强的地方在于换了个思路 —— 不是「仓库在那儿但拦着不让动」，
+     而是**仓库压根不存在于容器的文件系统里**，同 UID 的模型 chmod 不回来。
   3. `_framework_fingerprint()`：每次运行前后对框架树（agent/、bare_llm/、
      make_report.py、.git 的 HEAD/index/refs）做内容指纹，**一旦对不上立即抛错中止整轮**。
      这次是两小时后靠人眼发现的，不能再指望人眼。
@@ -62,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -76,6 +78,14 @@ SETTINGS = ROOT / "settings"
 # opencode 二进制装在项目内 vendor/（npm 的 arm64 包），不依赖全局安装，
 # 换机器只要 `cd vendor && npm install` 就能复现同一版本。
 OC_BIN = ROOT.parent / "vendor" / "node_modules" / ".bin" / "opencode"
+
+# 写屏障 docker 档用的镜像。**镜像标签是评测口径的一部分** —— 里面钉死了 opencode /
+# node / python / pytest 的版本，也就是「模型手上有哪些工具」。换镜像＝换口径，
+# 要像换模板那样记进报告，不能当成纯运维改动。
+# 构建：cd agent/docker && docker build -t llm-eval-agent:1.18.29 .
+_DOCKER_IMAGE = os.environ.get("EVAL_DOCKER_IMAGE", "llm-eval-agent:1.18.29")
+# 容器内 /tmp 是 tmpfs（根 fs 只读）。模型自己写的中间文件落这儿，跑完随容器消失。
+_DOCKER_TMPFS = os.environ.get("EVAL_DOCKER_TMPFS", "512m")
 
 # 各用例的 timeout 是按本机主力模型（~70 tok/s、不开思考）的实测耗时定的。
 # 换成慢很多的模型（稠密模型、开思考的 reasoning 模型）时，同样的能力会因为墙钟变长
@@ -134,8 +144,9 @@ class _isolated_oc_env:
     用完整个删掉。
     """
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, docker: bool = False):
         self.model = model
+        self.docker = docker
         self.base = None
 
     def __enter__(self):
@@ -143,7 +154,16 @@ class _isolated_oc_env:
         if not src.exists():
             raise RuntimeError(f"缺 settings/{self.model}.json")
         self.base = Path(tempfile.mkdtemp(prefix="oceval-", dir="/tmp"))
-        shutil.copy2(src, self.base / "opencode.json")
+        if self.docker:
+            # 容器里的 127.0.0.1 是容器自己 —— 不改这一处，模型一个 token 都拿不到。
+            # 只换 host，端口/路径/采样一概不碰（见 _rewrite_baseurl_for_docker）。
+            cfg = json.loads(src.read_text())
+            notes = _rewrite_baseurl_for_docker(cfg)
+            (self.base / "opencode.json").write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            _note_once("\n".join(f"[隔离] docker 档改写 baseURL：{n}" for n in notes))
+        else:
+            shutil.copy2(src, self.base / "opencode.json")
         for sub in ("config_dir", "data", "cache", "state", "home"):
             (self.base / sub).mkdir()
         return self.base
@@ -154,9 +174,13 @@ class _isolated_oc_env:
         return False
 
 
-def _env(model: str, ocdir: Path, cwd: Path) -> dict:
-    """构造隔离环境。防泄题三件套 + opencode 的家挪到临时目录 + **把 PWD 摆正**。"""
-    env = dict(os.environ)
+def _oc_vars(model: str, ocdir: Path, cwd: Path) -> dict:
+    """opencode 认的那几个变量。宿主档并进 os.environ，docker 档逐个 -e 传进容器。
+
+    拆出来是为了 docker 档能**只**把这些送进容器：容器里的环境从「继承了宿主一整套
+    无关变量」变成「这份清单里写了什么就有什么」，与镜像一起构成可复现的评测条件。
+    """
+    env = {}
     # ★★ 2026-09-06 事故的真正根因就在这一行。
     #   `subprocess.run(cwd=...)` 改的是进程的**真 cwd**，但**不动 `PWD` 环境变量** ——
     #   子进程继承的 PWD 还是父进程（run_eval.py，从 <repo>/agent 启动）的那个。
@@ -165,7 +189,6 @@ def _env(model: str, ocdir: Path, cwd: Path) -> dict:
     #   证据：事故那 108 个 session 的 directory 都是 <repo>/agent，与 run_eval.py 的启动目录
     #   逐字相同；而上个会话手工探针是 `cd <工作目录> && opencode ...`（PWD 正确）→ 目录正确。
     env["PWD"] = str(cwd)
-    env.pop("OLDPWD", None)
     env["OPENCODE_CONFIG"] = str(ocdir / "opencode.json")
     env["OPENCODE_CONFIG_DIR"] = str(ocdir / "config_dir")   # 挡开全局 ~/.config/opencode/AGENTS.md
     env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"                # 挡开 ~/.claude/CLAUDE.md（实测确认有效）
@@ -176,6 +199,14 @@ def _env(model: str, ocdir: Path, cwd: Path) -> dict:
     env["XDG_DATA_HOME"] = str(ocdir / "data")
     env["XDG_CACHE_HOME"] = str(ocdir / "cache")
     env["XDG_STATE_HOME"] = str(ocdir / "state")
+    return env
+
+
+def _env(model: str, ocdir: Path, cwd: Path) -> dict:
+    """宿主档（bwrap/chmod/none）用的整份环境：继承 os.environ 再盖上 opencode 那几个。"""
+    env = dict(os.environ)
+    env.update(_oc_vars(model, ocdir, cwd))
+    env.pop("OLDPWD", None)
     # 评测跑的是本机模型，不需要也不该有任何云端凭据在环境里
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
         env.pop(k, None)
@@ -183,7 +214,14 @@ def _env(model: str, ocdir: Path, cwd: Path) -> dict:
 
 
 # ── 第二层：写屏障 ────────────────────────────────────────────────────────
-# 两种实现，能力差一个量级，所以**必须让人知道当前在用哪一种**（绝不静默降级）：
+# 三种实现，能力逐档下降，所以**必须让人知道当前在用哪一种**（绝不静默降级）：
+#
+#   docker 容器级：**仓库压根不在容器的文件系统里** —— 不是「拦着不让写」而是「看不见、
+#          够不着」，同 UID 的模型 chmod 不回来。泄题通道也一并消失：容器里没有
+#          `~/.claude/CLAUDE.md`、没有宿主的祖先 AGENTS.md。附带好处是环境可复现：
+#          模型手上有哪些工具从「本机 PATH 的偶然」变成镜像里钉死的评测条件。
+#          代价：每次运行多 0.3~0.5 秒容器启动（相对中位 31 秒可忽略，且各模型同等承担）。
+#          前提：docker 可用 + 镜像已 build（`agent/docker/Dockerfile`）。
 #
 #   bwrap  内核级：整个文件系统只读挂载，只有工作目录与本次临时配置目录可写。
 #          模型就算 `cd <repo> && git commit` 也写不动。**这是想要的那种**。
@@ -195,9 +233,79 @@ def _env(model: str, ocdir: Path, cwd: Path) -> dict:
 #          （git 会直接报 Permission denied），但**挡不住存心 chmod 回来的模型** ——
 #          同一个 UID 本来就有这个权限。免 sudo，作为兜底。
 #
-# 选择：EVAL_SANDBOX=auto(默认，bwrap 可用就用，否则 chmod) | bwrap | chmod | none
+# 选择：EVAL_SANDBOX=auto(默认，按 docker → bwrap → chmod 取第一个能用的) |
+#       docker | bwrap | chmod | none
 _BWRAP = shutil.which("bwrap")
 _SANDBOX_MODE = os.environ.get("EVAL_SANDBOX", "auto")
+
+
+_NOTED = set()
+
+
+def _note_once(msg: str) -> None:
+    """同一句提示只打一次 —— 25 条用例 × k 次运行，不去重会把日志刷满。"""
+    if msg and msg not in _NOTED:
+        _NOTED.add(msg)
+        print(msg, flush=True)
+
+
+def _docker_ok() -> bool:
+    """docker 可用**且镜像已经 build 过** —— 装了 docker ≠ 镜像在本机。"""
+    if not shutil.which("docker"):
+        return False
+    try:
+        r = subprocess.run(["docker", "image", "inspect", _DOCKER_IMAGE],
+                           capture_output=True, timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+_GATEWAY = None
+
+
+def _docker_gateway() -> str:
+    """容器里回看宿主的地址 = 默认网桥的网关。
+
+    llama-swap 监听 `*:12345`，容器走默认网桥用网关地址就能连上，不必 `--network host`
+    （host 网络等于把宿主整个 loopback 摊开给被测模型看，没有必要）。
+    """
+    global _GATEWAY
+    if _GATEWAY:
+        return _GATEWAY
+    gw = os.environ.get("EVAL_DOCKER_GATEWAY", "").strip()
+    if not gw:
+        try:
+            r = subprocess.run(
+                ["docker", "network", "inspect", "bridge",
+                 "-f", "{{(index .IPAM.Config 0).Gateway}}"],
+                capture_output=True, text=True, timeout=30)
+            gw = (r.stdout or "").strip()
+        except Exception:
+            gw = ""
+    _GATEWAY = gw or "172.17.0.1"
+    return _GATEWAY
+
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0")
+
+
+def _rewrite_baseurl_for_docker(cfg: dict) -> list:
+    """把 settings 里指向宿主 loopback 的 baseURL 换成网关地址，返回改动说明。
+
+    ★ 只动 host 一段，端口/路径/模型 id/采样参数一概不碰 —— **口径不变，只是换了条
+      到达同一个 llama-swap 的路径**。指向别处（云端 endpoint）的 provider 原样不动。
+    """
+    notes = []
+    for name, prov in (cfg.get("provider") or {}).items():
+        opts = prov.get("options") or {}
+        url = opts.get("baseURL") or ""
+        for h in _LOOPBACK_HOSTS:
+            if f"//{h}:" in url or url.rstrip("/").endswith(f"//{h}"):
+                opts["baseURL"] = url.replace(h, _docker_gateway(), 1)
+                notes.append(f"{name} {url} → {opts['baseURL']}")
+                break
+    return notes
 
 
 def _bwrap_works() -> bool:
@@ -221,18 +329,55 @@ def _pick_sandbox() -> str:
         return _ACTIVE_SANDBOX
     mode = _SANDBOX_MODE
     if mode == "auto":
-        mode = "bwrap" if _bwrap_works() else "chmod"
+        # 强 → 弱依次取第一个真的能用的。docker 排最前：它是唯一「仓库看不见」的那档。
+        mode = "docker" if _docker_ok() else ("bwrap" if _bwrap_works() else "chmod")
+    if mode == "docker" and not _docker_ok():
+        raise RuntimeError(
+            f"EVAL_SANDBOX=docker 但用不了：要么 docker 不可用（当前用户需在 docker 组），"
+            f"要么镜像 {_DOCKER_IMAGE} 还没 build。\n"
+            f"  cd agent/docker && docker build -t {_DOCKER_IMAGE} .")
     if mode == "bwrap" and not _bwrap_works():
         raise RuntimeError("EVAL_SANDBOX=bwrap 但 bwrap 跑不起来（多半是 AppArmor 拦了非特权 "
                            "user namespace）。放开它，或改用 EVAL_SANDBOX=chmod。")
-    if mode not in ("bwrap", "chmod", "none"):
+    if mode not in ("docker", "bwrap", "chmod", "none"):
         raise RuntimeError(f"EVAL_SANDBOX 取值非法：{mode}")
     _ACTIVE_SANDBOX = mode
-    note = {"bwrap": "内核级只读挂载（最强）",
+    note = {"docker": f"容器隔离（最强，镜像 {_DOCKER_IMAGE}）：仓库不在容器的文件系统里",
+            "bwrap": "内核级只读挂载",
             "chmod": "同用户级只读（免 sudo 兜底；挡不住存心 chmod 回来的模型）",
             "none":  "★ 无写屏障 —— 只剩事后指纹核对，出事只能作废重跑"}[mode]
     print(f"[隔离] 写屏障 = {mode}：{note}", flush=True)
     return mode
+
+
+def _docker_prefix(work: Path, ocdir: Path, model: str, name: str) -> list:
+    """docker 档的命令前缀。后面接的是**容器里那个** opencode，不是宿主 vendor/ 里的。
+
+    几处不是随手写的：
+      --user <宿主uid:gid>  产出文件属主必须是主人 —— 判分要在宿主读工作目录的文件树 diff，
+                            root 拥有的文件会让后续清理和 diff 全乱套。
+      --read-only + tmpfs   根 fs 只读，可写的只有本次工作目录、临时配置目录和容器内 /tmp。
+      只挂两处               仓库不挂进来，于是容器里根本没有 CASEBOOK.md / cases/ / vault/。
+      同路径挂载             容器内路径与宿主逐字相同，模型自报的目录、报错里的路径都能直接对上。
+      --init                 opencode 会拉子进程；没有 init 收尸，超时后容易留下僵尸。
+      默认网桥               不用 --network host（那等于把宿主 loopback 全摊给被测模型）。
+    """
+    args = ["docker", "run", "--rm", "--init", "--name", name,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--read-only",
+            "--tmpfs", f"/tmp:rw,exec,size={_DOCKER_TMPFS}",
+            "-v", f"{work}:{work}", "-v", f"{ocdir}:{ocdir}",
+            "-w", str(work)]
+    env = _oc_vars(model, ocdir, work)
+    # 容器里这个 uid 在 /etc/passwd 中没有条目，HOME 必须显式给一个可写的地方，
+    # 否则 node/git 会去写 / 或 /root，撞上只读根 fs 直接起不来。
+    env["HOME"] = str(ocdir / "home")
+    env["LANG"] = "C.UTF-8"
+    env["TERM"] = "dumb"
+    for k, v in env.items():
+        args += ["-e", f"{k}={v}"]
+    args.append(_DOCKER_IMAGE)
+    return args
 
 
 def _sandbox_prefix(work: Path, ocdir: Path) -> list:
@@ -427,7 +572,9 @@ def run_agent(model: str, prompt: str, cwd: Path,
     所以对照实验前务必先确认这一档真的传下去了，别拿没生效的旋钮下结论。
     """
     _assert_clean_ancestry(cwd)
-    if not OC_BIN.exists():
+    mode = _pick_sandbox()
+    # docker 档跑的是镜像里那个 opencode，宿主 vendor/ 装没装都无所谓
+    if mode != "docker" and not OC_BIN.exists():
         raise RuntimeError(f"没找到 opencode 二进制：{OC_BIN}\n"
                            f"请先 `cd {OC_BIN.parents[2]} && npm install opencode-ai@latest`")
 
@@ -435,9 +582,18 @@ def run_agent(model: str, prompt: str, cwd: Path,
     # 第三层：跑之前先记框架指纹，跑完立刻核对（见 _assert_framework_intact）
     fp_before = _framework_fingerprint()
 
-    with _isolated_oc_env(model) as ocdir, _readonly_framework():   # 第一层＋第二层
-        cmd = _sandbox_prefix(cwd, ocdir) + [       # bwrap 可用时再加一道内核级只读
-            str(OC_BIN), "run", prompt,
+    with _isolated_oc_env(model, docker=(mode == "docker")) as ocdir, _readonly_framework():
+        cname = f"oceval-{os.getpid()}-{secrets.token_hex(3)}"
+        if mode == "docker":
+            # 容器内的 opencode（版本钉在镜像里）；容器内环境变量全走 -e，
+            # 这份 env 只是给 docker 客户端自己用的。
+            cmd = _docker_prefix(cwd, ocdir, model, cname) + ["opencode", "run", prompt]
+            env = dict(os.environ)
+        else:
+            cmd = _sandbox_prefix(cwd, ocdir) + [   # bwrap 可用时再加一道内核级只读
+                str(OC_BIN), "run", prompt]
+            env = _env(model, ocdir, cwd)
+        cmd += [
             "--pure",                       # 不加载任何外部插件
             "--auto",                       # 自动批准权限，等价于 CC 的 bypassPermissions
             "--format", "json",
@@ -450,9 +606,14 @@ def run_agent(model: str, prompt: str, cwd: Path,
         timed_out = False
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                                  timeout=timeout, env=_env(model, ocdir, cwd))
+                                  timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             timed_out = True
+            if mode == "docker":
+                # 杀掉 docker 客户端 ≠ 容器停了。不显式收掉，容器会攥着工作目录的写权限
+                # 继续跑 —— 判分就可能读到「判完之后才写进去」的文件，比超时本身更坏。
+                subprocess.run(["docker", "rm", "-f", cname],
+                               capture_output=True, timeout=120)
 
     # ⚠ 指纹必须在 with 之外核对：屏障还开着的时候框架文件是读不到的，
     #   在里面算指纹会把「被我自己摘了权限」误报成「被模型改了」。

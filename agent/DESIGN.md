@@ -23,14 +23,68 @@ opencode 认 `PWD`，于是它以为自己在 `run_eval.py` 的启动目录（`<
 1. **`_env()` 里 `env["PWD"] = str(cwd)` + `_isolated_oc_env()`** —— 前者是根因修复，
    后者把 opencode 的 config / config_dir / XDG 目录整套挪到 `/tmp/oceval-xxx`（跑完即删），
    仓库里不再有任何 opencode 认得的东西。**这一行 PWD 千万别删**。
-2. **写屏障 `_sandbox_prefix()` / `_readonly_framework()`**，两档且开跑时会打印当前档位：
-   `bwrap`（内核级只读 + 仓库被 tmpfs 盖掉，连读都读不到，需一次 sudo 放开 AppArmor）、
+2. **写屏障 `_sandbox_prefix()` / `_readonly_framework()`**，三档且开跑时会打印当前档位：
+   `docker`（**默认，2026-09-06 夜加**：模型在容器里干活，仓库压根不挂进去）、
+   `bwrap`（内核级只读 + 仓库被 tmpfs 盖掉，需一次 sudo 放开 AppArmor）、
    `chmod`（免 sudo 兜底：摘掉整仓库写位，答案册/出题源/保管库连读位一起摘）。
-   `EVAL_SANDBOX=auto|bwrap|chmod|none` 可选，**没有静默降级这一档**。
+   `EVAL_SANDBOX=auto|docker|bwrap|chmod|none` 可选，**没有静默降级这一档**。
+
+   docker 档强在**换了个思路**：前两档是「仓库在那儿、拦着不让动」，容器是「仓库不存在
+   于这个文件系统里」—— 同 UID 的模型 `chmod` 不回来。实测三样逃逸的报错也从
+   `Permission denied` 变成 `No such file or directory`。顺带把泄题通道从「靠环境变量挡」
+   变成「容器里根本没有 `~/.claude/CLAUDE.md`、没有祖先 `AGENTS.md`」。
 3. **`_framework_fingerprint()` 哨兵** —— 每次运行前后对框架树（含 `.git` 的 HEAD/index/refs）
    算内容指纹，对不上立即抛错中止整轮。这次是两小时后靠人眼发现的，不能再指望人眼。
 
 完整经过、证据与恢复方法见仓库根的《事故报告-模型越狱改仓库-20260906.md》。
+
+### ★ 镜像版本 = 评测条件的一部分
+
+`agent/docker/Dockerfile` 里钉死了 opencode 1.18.29 / node 24.14.1 / python 3.12 /
+pytest 9.1.1 / numpy 2.4.4 / pandas 3.0.2 / requests 2.33.1，构建成 `llm-eval-agent:1.18.29`。
+**「模型手上有哪些工具、跑在什么版本上」从此不再是本机 PATH 的偶然，而是这份文件里
+写死的东西** —— 改镜像等于换口径，要像换模板那样记进报告，不能当纯运维改动。
+
+几处不是随手定的：
+
+- **node 跟宿主对齐（24 而不是草案里的 22）**：宿主 `vendor/` 那份跑通过的是 24.14.1，
+  换 22 等于引入一个没验证过的变量。
+- **pytest 对齐宿主判分侧（9.1.1）**：用例是 pytest 项目，模型在容器里自测的结果
+  要和宿主判分跑出来的一致，否则会出现「模型说通过了、判分说没过」。
+- **装了 numpy / pandas / requests**：模型写的解答里真出现过这些 import。容器里缺一个库，
+  判分就把「宿主上跑得通的答案」记成「代码不可用」—— 那是口径漂移，不是模型退步。
+  scipy/torch 没跟：算法题用不上，跟了镜像要大一个量级。真遇到就补进 Dockerfile 那一行。
+- **`--user <宿主uid:gid>`**：判分要在宿主读工作目录的文件树 diff，产出文件属主必须是主人。
+- **同路径挂载**（容器内路径与宿主逐字相同）：模型自报的目录、报错里的路径都能直接对上。
+- **默认网桥 + baseURL 改写**：容器里的 `127.0.0.1` 是容器自己，`_isolated_oc_env()` 拷贝
+  settings 时把 loopback 换成网关（只换 host，端口/模型 id/采样一概不碰）。
+  不用 `--network host` —— 那等于把宿主整个 loopback 摊给被测模型。
+
+**口径变化要在报告里注明**：容器启动每次多 0.3~0.5 秒（相对中位 31 秒可忽略，三个模型
+同等承担、不影响横比，但别被误读成模型变慢）；工具集与 python 版本变了，属于与换壳同级的
+口径变更 —— 好在 agent 卷本来就要重新立基线，现在切最便宜。
+
+### 裸卷那一层也进了容器
+
+`bare_llm/eval_lib.py` 的 `run_code()` / `run_code_verdict()` 执行的是**模型现写的
+Python**（HC/X 两卷几百次），以前直接在宿主上跑。裸卷不给模型工具，但**这一层是框架
+自己主动执行模型输出**，同样得挡住：一句 `shutil.rmtree` 就能删掉家目录，而它并不需要
+这份权限才能答对一道算法题。
+
+现在默认走容器（`--network none` + 只读根 fs + 只挂一个 `/tmp/barecode-xxx` 临时目录，
+模型代码也不再写进仓库的 `bare_llm/`），`EVAL_CODE_SANDBOX=auto|docker|host` 可切。
+两档实测对照：
+
+| 探针 | host 档 | docker 档 |
+|---|---|---|
+| 读 `CASEBOOK.md` | 读到了正文开头 | FileNotFoundError |
+| 往仓库 `README.md` 追加一行 | **写成功了** | FileNotFoundError |
+| 看家目录 `~/.bashrc` | 看得见 | 看不见 |
+| 连本机 LLM 端点 | 连上了 | OSError |
+
+**判分口径没变**：拿 HC 卷真题的 test，用「参考解 / 只错边界 / 根本跑不起来 / 死循环超时 /
+numpy 写的解」五种形态对拍，两档 8/8 逐字一致。docker 档的超时另加 2 秒余量
+（`EVAL_CODE_GRACE`）—— 超时是给「算法本身跑多久」定的，不该被容器启动开销吃掉。
 
 ## 〇、2026-09-06：外壳从 Claude Code 换成 opencode
 

@@ -1,0 +1,7 @@
+[user]
+	name = eval
+	email = eval@localhost
+[safe]
+	directory = *
+[init]
+	defaultBranch = main

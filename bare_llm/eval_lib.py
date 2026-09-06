@@ -1,5 +1,5 @@
 # A/B 评测公共库：发请求 + 各类自动判分器。被 smoke / full 脚本复用。
-import json, subprocess, time, urllib.request, re, os, sys
+import atexit, json, shutil, subprocess, tempfile, time, urllib.request, re, os, sys
 
 BASE = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:12345/v1").rstrip("/") + "/chat/completions"
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
@@ -242,17 +242,98 @@ def extract_code(text):
     m = re.findall(r"```(?:python)?\s*(.*?)```", text, re.S)
     return m[0].strip() if m else text.strip()
 
+# ── 模型代码的执行沙箱 ────────────────────────────────────────────────────
+# run_code() / run_code_verdict() 跑的是**模型现写的 Python**，HC/X 两卷加起来几百次。
+# 在宿主上直接跑，等于把一个 shell 交给被测模型：一句 shutil.rmtree 就能删掉家目录，
+# 而它并不需要这份权限才能答对一道算法题 —— 代价极不对称，所以默认放进容器。
+# （agent 卷那边模型有工具、有越狱的手，已经在容器里跑；裸卷不给工具，但**这一层**
+#   是框架自己主动执行模型输出，同样得挡住。）
+#
+#   docker  --network none + 只读根 fs + 只挂一个临时目录，跑完即弃
+#   host    历史行为：直接 subprocess 跑。docker 不可用时的兜底，会打印出来
+#
+# EVAL_CODE_SANDBOX=auto(默认，docker 可用就用) | docker | host
+CODE_SANDBOX = os.environ.get("EVAL_CODE_SANDBOX", "auto")
+CODE_IMAGE = os.environ.get("EVAL_DOCKER_IMAGE", "llm-eval-agent:1.18.29")
+# 容器启动大约 0.3~0.5 秒。超时是给「算法本身跑多久」定的，不该被启动开销吃掉，
+# 所以 docker 档统一补一点余量 —— 否则同一份代码在两档下的超时判定口径不一样。
+CODE_STARTUP_GRACE = float(os.environ.get("EVAL_CODE_GRACE", "2"))
+# 模型代码落在 /tmp 的临时目录，不再写进仓库的 bare_llm/（以前 _sol.py 就落在那儿）
+CODE_TMP = tempfile.mkdtemp(prefix="barecode-")
+atexit.register(lambda: shutil.rmtree(CODE_TMP, ignore_errors=True))
+
+_CODE_MODE = None
+
+
+def _pick_code_sandbox():
+    """选一次、打印一次。与 agent 卷那边一样：绝不静默降级。"""
+    global _CODE_MODE
+    if _CODE_MODE:
+        return _CODE_MODE
+    mode = CODE_SANDBOX
+    if mode == "auto":
+        mode = "docker" if _code_docker_ok() else "host"
+    if mode == "docker" and not _code_docker_ok():
+        raise RuntimeError(f"EVAL_CODE_SANDBOX=docker 但 docker 或镜像 {CODE_IMAGE} 不可用；"
+                           f"先 build（agent/docker/Dockerfile），或显式用 host 档。")
+    if mode not in ("docker", "host"):
+        raise RuntimeError(f"EVAL_CODE_SANDBOX 取值非法：{mode}")
+    _CODE_MODE = mode
+    note = {"docker": f"容器执行（{CODE_IMAGE}，--network none，只挂临时目录）",
+            "host":   "★ 宿主直接执行 —— 模型代码拿的是当前用户的全部权限"}[mode]
+    print(f"[隔离] 模型代码执行 = {mode}：{note}", flush=True)
+    return mode
+
+
+def _code_docker_ok():
+    if not shutil.which("docker"):
+        return False
+    try:
+        return subprocess.run(["docker", "image", "inspect", CODE_IMAGE],
+                              capture_output=True, timeout=30).returncode == 0
+    except Exception:
+        return False
+
+
+def _run_pyfile(path, timeout):
+    """跑一个 .py 文件，返回 (completed_process 或 None, 是否超时)。
+
+    docker 档下超时要**显式收掉容器** —— 杀 docker 客户端不等于容器停了，
+    留着它继续跑会一直占着 CPU，还可能把后一道题的判分拖慢。
+    """
+    if _pick_code_sandbox() == "host":
+        try:
+            return subprocess.run([sys.executable, path], capture_output=True,
+                                  timeout=timeout, text=True), False
+        except subprocess.TimeoutExpired:
+            return None, True
+    name = f"barecode-{os.getpid()}-{os.urandom(3).hex()}"
+    cmd = ["docker", "run", "--rm", "--init", "--name", name,
+           "--network", "none",                       # 算法题不需要网络，断掉
+           "--user", f"{os.getuid()}:{os.getgid()}",
+           "--read-only", "--tmpfs", "/tmp:rw,exec,size=256m",
+           "-v", f"{CODE_TMP}:{CODE_TMP}", "-w", CODE_TMP,
+           "-e", "HOME=/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1",
+           CODE_IMAGE, "python3", path]
+    try:
+        return subprocess.run(cmd, capture_output=True,
+                              timeout=timeout + CODE_STARTUP_GRACE, text=True), False
+    except subprocess.TimeoutExpired:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
+        return None, True
+
+
 def run_code(code, test):
     """把模型代码 + 测试拼到一起跑，退出码 0 = 通过。隔离子进程、15s 超时。"""
-    f = os.path.join(SCRATCH, "_sol.py")
+    f = os.path.join(CODE_TMP, "_sol.py")
     with open(f, "w") as fh:
         fh.write(code + "\n\n# ---- test ----\n" + test + "\nprint('ALL_PASS')\n")
     try:
-        r = subprocess.run([sys.executable, f], capture_output=True, timeout=15, text=True)
+        r, timed_out = _run_pyfile(f, 15)
+        if timed_out:
+            return False, "TIMEOUT"
         ok = (r.returncode == 0 and "ALL_PASS" in r.stdout)
         return ok, (r.stderr or r.stdout)[-300:].strip()
-    except subprocess.TimeoutExpired:
-        return False, "TIMEOUT"
     except Exception as e:
         return False, str(e)
 
@@ -313,17 +394,17 @@ def run_code_verdict(code, test, timeout=15):
 
     runner = (code + "\n\n# ---- test ----\n_R = []\n" + instrumented
               + "\nimport json as _json\nprint('__R__' + _json.dumps(_R))\n")
-    f = os.path.join(SCRATCH, "_sol_verdict.py")
+    f = os.path.join(CODE_TMP, "_sol_verdict.py")
     with open(f, "w") as fh:
         fh.write(runner)
     try:
-        r = subprocess.run([sys.executable, f], capture_output=True, timeout=timeout, text=True)
-    except subprocess.TimeoutExpired:
-        v.f2p_total = n_assert                      # 一条都没过
-        return v.p2p_add(False).note("TIMEOUT")
+        r, timed_out = _run_pyfile(f, timeout)
     except Exception as e:
         v.grader_error = f"子进程异常: {e}"
         return v
+    if timed_out:
+        v.f2p_total = n_assert                      # 一条都没过
+        return v.p2p_add(False).note("TIMEOUT")
 
     m = re.search(r"__R__(\[.*?\])", r.stdout or "")
     if not m:
